@@ -450,23 +450,24 @@ app.get('/session-message', async (req, res) => {
     // 9. Wait for bot reply to appear
     await page.waitForFunction(
       (count) => {
-        return document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light').length > count;
+        return document.querySelectorAll(
+          'div[data-testid="completed-message"] div.font-display.font-light'
+        ).length > count;
       },
       { timeout: 60000 },
       initialCount
     );
 
-    // 10. Wait until latest message stops changing (stream finished)
-    let lastText = "";
+    // 10. Wait until message stops streaming
+    let lastText = '';
     let stableCount = 0;
-    while (stableCount < 3) { // ~1.5s stable
-      const currentText = await page.evaluate((initialCount) => {
-        const allMsgs = Array.from(
-          document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light')
+    while (stableCount < 3) {
+      const currentText = await page.evaluate(() => {
+        const allMsgs = document.querySelectorAll(
+          'div[data-testid="completed-message"] div.font-display.font-light'
         );
-        const newMsgs = allMsgs.slice(initialCount);
-        return newMsgs[newMsgs.length - 1]?.innerText.trim() || "";
-      }, initialCount);
+        return allMsgs[0]?.innerText.trim() || '';
+      });
 
       if (currentText === lastText) {
         stableCount++;
@@ -477,14 +478,13 @@ app.get('/session-message', async (req, res) => {
       await new Promise(r => setTimeout(r, 500));
     }
 
-    // 11. Get only bot's latest reply
-    const reply = await page.evaluate((initialCount) => {
+    // 11. Get newest bot reply (top of the list)
+    const reply = await page.evaluate(() => {
       const allMsgs = Array.from(
         document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light')
       );
-      const newMsgs = allMsgs.slice(initialCount);
-      return newMsgs.length > 0 ? newMsgs[newMsgs.length - 1].innerText.trim() : null;
-    }, initialCount);
+      return allMsgs.length > 0 ? allMsgs[0].innerText.trim() : null;
+    });
 
     // 12. Store session
     const uid = Math.random().toString(36).substring(2, 10);
