@@ -452,38 +452,38 @@ app.get('/session-message', async (req, res) => {
       initialCount
     );
 
-    // 10. Wait until top bot message stops changing (~1.5s stable)
-    let lastText = '';
-    let stableCount = 0;
-    while (stableCount < 3) {
-      const currentText = await page.evaluate((userMsg, prevCount) => {
-        const allMsgs = Array.from(document.querySelectorAll(
-          'div[data-testid="completed-message"] div.font-display.font-light'
-        ));
-        const newMsgs = allMsgs.slice(prevCount); // only new messages
-        const botMsgs = newMsgs.map(el => el.innerText.trim())
-                               .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase());
-        return botMsgs[0] || '';
-      }, message, initialCount);
+  // 10. Wait until top bot message stops changing (~1.5s stable)
+let lastText = '';
+let stableCount = 0;
+while (stableCount < 3) {
+  const currentText = await page.evaluate((userMsg, prevCount) => {
+    const allMsgs = Array.from(document.querySelectorAll(
+      'div[data-testid="completed-message"] div.font-display.font-light'
+    ));
+    const newMsgs = allMsgs.slice(prevCount); // only new messages
+    const botMsgs = newMsgs.map(el => el.innerText.trim())
+                           .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase());
+    return botMsgs[botMsgs.length - 1] || ''; // <-- last message instead of first
+  }, message, initialCount);
 
-      if (currentText === lastText) stableCount++;
-      else {
-        stableCount = 0;
-        lastText = currentText;
-      }
-      await new Promise(r => setTimeout(r, 500));
-    }
+  if (currentText === lastText) stableCount++;
+  else {
+    stableCount = 0;
+    lastText = currentText;
+  }
+  await new Promise(r => setTimeout(r, 500));
+}
 
-    // 11. Get newest bot reply ignoring user's own message
-    const reply = await page.evaluate((userMsg, prevCount) => {
-      const allMsgs = Array.from(document.querySelectorAll(
-        'div[data-testid="completed-message"] div.font-display.font-light'
-      ));
-      const newMsgs = allMsgs.slice(prevCount);
-      const botMsgs = newMsgs.map(el => el.innerText.trim())
-                             .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase());
-      return botMsgs[0] || null;
-    }, message, initialCount);
+// 11. Get newest bot reply ignoring user's own message
+const reply = await page.evaluate((userMsg, prevCount) => {
+  const allMsgs = Array.from(document.querySelectorAll(
+    'div[data-testid="completed-message"] div.font-display.font-light'
+  ));
+  const newMsgs = allMsgs.slice(prevCount);
+  const botMsgs = newMsgs.map(el => el.innerText.trim())
+                         .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase());
+  return botMsgs[botMsgs.length - 1] || null; // <-- last new message
+}, message, initialCount);
 
     // 12. Store session
     const uid = Math.random().toString(36).substring(2, 10);
