@@ -422,13 +422,16 @@ app.get('/session-message', async (req, res) => {
     });
 
     // 5. Open chat page
-    await page.goto('https://character.ai/chat/UMvyxGD17y0PfEoC3oB_K44ova364o4GCKH23YiwuRc', {
-      waitUntil: 'domcontentloaded',
-      timeout: 60000
-    });
+    await page.goto(
+      'https://character.ai/chat/UMvyxGD17y0PfEoC3oB_K44ova364o4GCKH23YiwuRc',
+      { waitUntil: 'domcontentloaded', timeout: 60000 }
+    );
 
     // 6. Wait for input
-    await page.waitForSelector('textarea[placeholder*="Message"]', { visible: true, timeout: 60000 });
+    await page.waitForSelector('textarea[placeholder*="Message"]', {
+      visible: true,
+      timeout: 60000
+    });
 
     // 7. Count messages before sending
     const initialCount = await page.$$eval(
@@ -444,27 +447,44 @@ app.get('/session-message', async (req, res) => {
     }, { timeout: 30000 });
     await page.click('button[aria-label="Send a message..."]');
 
-    // 9. Wait for bot to reply (detecting new message count)
-    await page.waitForFunction((count) => {
-      const msgs = document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light');
-      return msgs.length > count;
-    }, { timeout: 60000 }, initialCount);
+    // 9. Wait for bot reply to appear
+    await page.waitForFunction(
+      (count) => {
+        return document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light').length > count;
+      },
+      { timeout: 60000 },
+      initialCount
+    );
 
-    // 10. Wait until the typing/streaming indicator disappears
-    await page.waitForFunction(() => {
-      const latestMessage = document.querySelector('div[data-testid="completed-message"]');
-      if (!latestMessage) return false;
+    // 10. Wait until latest message stops changing (stream finished)
+    let lastText = "";
+    let stableCount = 0;
+    while (stableCount < 3) { // ~1.5s stable
+      const currentText = await page.evaluate((initialCount) => {
+        const allMsgs = Array.from(
+          document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light')
+        );
+        const newMsgs = allMsgs.slice(initialCount);
+        return newMsgs[newMsgs.length - 1]?.innerText.trim() || "";
+      }, initialCount);
 
-      // Look for elements that indicate streaming
-      const typingIndicator = latestMessage.querySelector('svg, .animate-pulse, .typing, .loader');
-      return !typingIndicator;
-    }, { timeout: 120000 });
+      if (currentText === lastText) {
+        stableCount++;
+      } else {
+        stableCount = 0;
+        lastText = currentText;
+      }
+      await new Promise(r => setTimeout(r, 500));
+    }
 
-    // 11. Get latest reply (newest is at index 0)
-    const reply = await page.evaluate(() => {
-      const msgs = document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light');
-      return msgs[0]?.innerText.trim() || null;
-    });
+    // 11. Get only bot's latest reply
+    const reply = await page.evaluate((initialCount) => {
+      const allMsgs = Array.from(
+        document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light')
+      );
+      const newMsgs = allMsgs.slice(initialCount);
+      return newMsgs.length > 0 ? newMsgs[newMsgs.length - 1].innerText.trim() : null;
+    }, initialCount);
 
     // 12. Store session
     const uid = Math.random().toString(36).substring(2, 10);
@@ -478,7 +498,6 @@ app.get('/session-message', async (req, res) => {
     res.status(500).send('Error: ' + err.message);
   }
 });
-
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`)
 })
