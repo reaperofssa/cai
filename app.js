@@ -366,9 +366,10 @@ app.get('/session-screenshot', async (req, res) => {
 })
 
 app.get('/session-message', async (req, res) => {
-  const { profile, message } = req.query;
+  const { profile, message, chatId } = req.query;
   if (!profile) return res.status(400).send('Missing profile URL');
   if (!message) return res.status(400).send('Missing message');
+  if (!chatId) return res.status(400).send('Missing chatId');
 
   const tempDir = path.join(os.tmpdir(), 'pupp_profile_' + Date.now());
   fs.mkdirSync(tempDir, { recursive: true });
@@ -421,9 +422,9 @@ app.get('/session-message', async (req, res) => {
       Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 });
     });
 
-    // 5. Open chat page
+    // 5. Open chat page using chatId
     await page.goto(
-      'https://character.ai/chat/UMvyxGD17y0PfEoC3oB_K44ova364o4GCKH23YiwuRc',
+      `https://character.ai/chat/${chatId}`,
       { waitUntil: 'domcontentloaded', timeout: 60000 }
     );
 
@@ -467,7 +468,7 @@ app.get('/session-message', async (req, res) => {
           document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light')
         )
           .map(el => el.innerText.trim())
-          .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase()); // skip user message
+          .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase());
 
         return allMsgs[0] || '';
       }, message);
@@ -487,7 +488,7 @@ app.get('/session-message', async (req, res) => {
         document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light')
       )
         .map(el => el.innerText.trim())
-        .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase()); // skip user message
+        .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase());
 
       return allMsgs[0] || null;
     }, message);
@@ -504,7 +505,6 @@ app.get('/session-message', async (req, res) => {
     res.status(500).send('Error: ' + err.message);
   }
 });
-
 app.get('/session-message-continue', async (req, res) => {
   const { uid, message } = req.query;
   if (!uid) return res.status(400).send('Missing uid');
