@@ -412,7 +412,7 @@ app.get('/session-message', async (req, res) => {
     });
     await page.setExtraHTTPHeaders({ 'accept-language': 'en-US,en;q=0.9' });
 
-    // 4. Stealth patches (copied from your existing route)
+    // 4. Stealth patches
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
       Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
@@ -422,92 +422,40 @@ app.get('/session-message', async (req, res) => {
       Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
       Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
       Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 });
-
-      const toDataURL = HTMLCanvasElement.prototype.toDataURL;
-      HTMLCanvasElement.prototype.toDataURL = function () {
-        const ctx = this.getContext('2d');
-        ctx.fillStyle = 'rgba(255,255,255,0.01)';
-        ctx.fillRect(0, 0, this.width, this.height);
-        return toDataURL.apply(this, arguments);
-      };
-
-      const getImageData = CanvasRenderingContext2D.prototype.getImageData;
-      CanvasRenderingContext2D.prototype.getImageData = function () {
-        const data = getImageData.apply(this, arguments);
-        for (let i = 0; i < data.data.length; i += 50) {
-          data.data[i] = data.data[i] ^ 0x01;
-        }
-        return data;
-      };
-
-      const getParameter = WebGLRenderingContext.prototype.getParameter;
-      WebGLRenderingContext.prototype.getParameter = function (param) {
-        if (param === 37445) return 'Intel Inc.';
-        if (param === 37446) return 'Intel Iris OpenGL Engine';
-        return getParameter.call(this, param);
-      };
-
-      const getChannelData = AudioBuffer.prototype.getChannelData;
-      AudioBuffer.prototype.getChannelData = function () {
-        const data = getChannelData.call(this);
-        for (let i = 0; i < data.length; i += 100) {
-          data[i] = data[i] + Math.random() * 0.00001;
-        }
-        return data;
-      };
-
-      const originalQuery = navigator.permissions.query;
-      navigator.permissions.query = parameters =>
-        parameters.name === 'notifications'
-          ? Promise.resolve({ state: 'denied' })
-          : originalQuery(parameters);
-
-      const originalFonts = document.fonts;
-      document.fonts = { check: () => true, ready: Promise.resolve(), ...originalFonts };
-
-      Intl.DateTimeFormat = function () {
-        return {
-          resolvedOptions: () => ({ timeZone: 'America/New_York' })
-        };
-      };
-
-      const origNow = performance.now;
-      performance.now = function () {
-        return origNow.call(this) + Math.random() * 0.0001;
-      };
     });
 
     // 5. Go to specific chat
     await page.goto('https://character.ai/chat/UMvyxGD17y0PfEoC3oB_K44ova364o4GCKH23YiwuRc', {
-      waitUntil: 'networkidle2',
+      waitUntil: 'domcontentloaded',
       timeout: 60000
     });
 
-    // 6. Send message
-    await page.waitForSelector('textarea[placeholder="Message..."]', { visible: true });
-    await page.type('textarea[placeholder="Message..."]', message, { delay: 50 });
+    // 6. Wait for chat input to appear
+    await page.waitForSelector('main.h-full', { visible: true, timeout: 60000 });
+    await page.waitForSelector('textarea[placeholder*="Message"]', { visible: true, timeout: 60000 });
+
+    // 7. Type and send message
+    await page.type('textarea[placeholder*="Message"]', message, { delay: 50 });
     await page.waitForFunction(() => {
       const btn = document.querySelector('button[aria-label="Send a message..."]');
       return btn && !btn.disabled;
-    });
+    }, { timeout: 30000 });
     await page.click('button[aria-label="Send a message..."]');
 
-    // 7. Wait for reply & grab newest
-    await page.waitForSelector('div[data-testid="completed-message"]', { visible: true });
+    // 8. Wait for newest reply
+    await page.waitForSelector('div[data-testid="completed-message"]', { visible: true, timeout: 60000 });
     const reply = await page.evaluate(() => {
       const messages = document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light');
       const lastMessage = messages[messages.length - 1];
       return lastMessage ? lastMessage.innerText.trim() : null;
     });
 
-    // 8. Generate UID for reuse
+    // 9. Generate UID and save session
     const uid = Math.random().toString(36).substring(2, 10);
-
-    res.json({ uid, reply });
-
-    // ❗ Keep browser alive for reuse — store it globally
     globalThis.sessions = globalThis.sessions || {};
     globalThis.sessions[uid] = { browser, page };
+
+    res.json({ uid, reply });
 
   } catch (err) {
     console.error(err);
