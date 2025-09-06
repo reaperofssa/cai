@@ -563,7 +563,7 @@ app.get('/session-message-continue', async (req, res) => {
         stableCount = 0;
         lastText = currentText;
       }
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise(r => setTimeout(r, 1200));
     }
 
     // 6. Get newest bot reply ignoring user's message
