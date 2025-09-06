@@ -374,7 +374,6 @@ app.get('/session-message', async (req, res) => {
   fs.mkdirSync(tempDir, { recursive: true });
 
   try {
-    // 1. Download and extract session profile
     const response = await axios.get(profile, { responseType: 'arraybuffer' });
     const zipPath = path.join(tempDir, 'profile.zip');
     fs.writeFileSync(zipPath, response.data);
@@ -382,7 +381,6 @@ app.get('/session-message', async (req, res) => {
     const zip = new AdmZip(zipPath);
     zip.extractAllTo(tempDir, true);
 
-    // 2. Launch browser
     const browser = await puppeteer.launch({
       headless: true,
       userDataDir: tempDir,
@@ -398,7 +396,6 @@ app.get('/session-message', async (req, res) => {
 
     const page = await browser.newPage();
 
-    // 3. Apply random UA + stealth tweaks
     const userAgents = [
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36',
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36',
@@ -412,7 +409,6 @@ app.get('/session-message', async (req, res) => {
     });
     await page.setExtraHTTPHeaders({ 'accept-language': 'en-US,en;q=0.9' });
 
-    // 4. Stealth patches
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
       Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
@@ -424,17 +420,21 @@ app.get('/session-message', async (req, res) => {
       Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 });
     });
 
-    // 5. Go to specific chat
     await page.goto('https://character.ai/chat/UMvyxGD17y0PfEoC3oB_K44ova364o4GCKH23YiwuRc', {
       waitUntil: 'domcontentloaded',
       timeout: 60000
     });
 
-    // 6. Wait for chat input to appear
     await page.waitForSelector('main.h-full', { visible: true, timeout: 60000 });
     await page.waitForSelector('textarea[placeholder*="Message"]', { visible: true, timeout: 60000 });
 
-    // 7. Type and send message
+    // Count current messages before sending
+    const initialCount = await page.$$eval(
+      'div[data-testid="completed-message"] div.font-display.font-light',
+      msgs => msgs.length
+    );
+
+    // Send the new message
     await page.type('textarea[placeholder*="Message"]', message, { delay: 50 });
     await page.waitForFunction(() => {
       const btn = document.querySelector('button[aria-label="Send a message..."]');
@@ -442,18 +442,20 @@ app.get('/session-message', async (req, res) => {
     }, { timeout: 30000 });
     await page.click('button[aria-label="Send a message..."]');
 
-    // 8. Wait for newest reply
-    await page.waitForSelector('div[data-testid="completed-message"]', { visible: true, timeout: 60000 });
-    const reply = await page.evaluate(() => {
-      const messages = document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light');
-      const lastMessage = messages[messages.length - 1];
-      return lastMessage ? lastMessage.innerText.trim() : null;
-    });
+    // Wait 6 seconds to ensure bot reply appears
+    await new Promise(r => setTimeout(r, 6000));
 
-    // 9. Generate UID and save session
+    // Fetch only new messages
+    const newMessages = await page.evaluate((initialCount) => {
+      const all = Array.from(document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light'));
+      return all.slice(initialCount).map(m => m.innerText.trim());
+    }, initialCount);
+
+    const reply = newMessages.length > 0 ? newMessages[newMessages.length - 1] : null;
+
     const uid = Math.random().toString(36).substring(2, 10);
     globalThis.sessions = globalThis.sessions || {};
-    globalThis.sessions[uid] = { browser, page };
+    globalThis.sessions[uid] = { browser, page, messageCount: initialCount + newMessages.length };
 
     res.json({ uid, reply });
 
