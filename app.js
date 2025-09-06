@@ -534,25 +534,28 @@ app.get('/session-message-continue', async (req, res) => {
     }, { timeout: 30000 });
     await page.click('button[aria-label="Send a message..."]');
 
-    // 4. Wait for at least one new message to appear
+    // 4. Wait for bot reply to appear (at least 2 new messages: user's + bot's)
     await page.waitForFunction(
-      (count) => document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light').length > count,
+      (count) => {
+        return document.querySelectorAll(
+          'div[data-testid="completed-message"] div.font-display.font-light'
+        ).length >= count + 2;
+      },
       { timeout: 60000 },
       prevCount
     );
 
-    // 5. Wait until the top bot message stops changing (~1.5s stable)
+    // 5. Wait until top bot message stops changing (~1.5s stable)
     let lastText = '';
     let stableCount = 0;
     while (stableCount < 3) {
       const currentText = await page.evaluate((userMsg) => {
-        const allMsgs = Array.from(document.querySelectorAll(
-          'div[data-testid="completed-message"] div.font-display.font-light'
-        ));
-        // ignore user message, pick top-most bot message
-        const botMsgs = allMsgs.map(el => el.innerText.trim())
-                               .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase());
-        return botMsgs[0] || '';
+        const allMsgs = Array.from(
+          document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light')
+        )
+          .map(el => el.innerText.trim())
+          .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase()); // skip user message
+        return allMsgs[0] || '';
       }, message);
 
       if (currentText === lastText) stableCount++;
@@ -565,12 +568,12 @@ app.get('/session-message-continue', async (req, res) => {
 
     // 6. Get newest bot reply ignoring user's message
     const reply = await page.evaluate((userMsg) => {
-      const allMsgs = Array.from(document.querySelectorAll(
-        'div[data-testid="completed-message"] div.font-display.font-light'
-      ));
-      const botMsgs = allMsgs.map(el => el.innerText.trim())
-                             .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase());
-      return botMsgs[0] || null;
+      const allMsgs = Array.from(
+        document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light')
+      )
+        .map(el => el.innerText.trim())
+        .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase()); // skip user message
+      return allMsgs[0] || null;
     }, message);
 
     // 7. Update session message count
