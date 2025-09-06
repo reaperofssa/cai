@@ -374,13 +374,13 @@ app.get('/session-message', async (req, res) => {
   fs.mkdirSync(tempDir, { recursive: true });
 
   try {
+    // 1. Download and extract profile
     const response = await axios.get(profile, { responseType: 'arraybuffer' });
     const zipPath = path.join(tempDir, 'profile.zip');
     fs.writeFileSync(zipPath, response.data);
+    new AdmZip(zipPath).extractAllTo(tempDir, true);
 
-    const zip = new AdmZip(zipPath);
-    zip.extractAllTo(tempDir, true);
-
+    // 2. Launch Puppeteer
     const browser = await puppeteer.launch({
       headless: true,
       userDataDir: tempDir,
@@ -396,6 +396,7 @@ app.get('/session-message', async (req, res) => {
 
     const page = await browser.newPage();
 
+    // 3. Random UA
     const userAgents = [
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36',
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36',
@@ -407,8 +408,8 @@ app.get('/session-message', async (req, res) => {
       height: 720 + Math.floor(Math.random() * 50),
       deviceScaleFactor: 1
     });
-    await page.setExtraHTTPHeaders({ 'accept-language': 'en-US,en;q=0.9' });
 
+    // 4. Stealth patches
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
       Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
@@ -420,21 +421,22 @@ app.get('/session-message', async (req, res) => {
       Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 });
     });
 
+    // 5. Open chat page
     await page.goto('https://character.ai/chat/UMvyxGD17y0PfEoC3oB_K44ova364o4GCKH23YiwuRc', {
       waitUntil: 'domcontentloaded',
       timeout: 60000
     });
 
-    await page.waitForSelector('main.h-full', { visible: true, timeout: 60000 });
+    // 6. Wait for input
     await page.waitForSelector('textarea[placeholder*="Message"]', { visible: true, timeout: 60000 });
 
-    // Count current messages before sending
+    // 7. Count messages before sending
     const initialCount = await page.$$eval(
       'div[data-testid="completed-message"] div.font-display.font-light',
       msgs => msgs.length
     );
 
-    // Send the new message
+    // 8. Send message
     await page.type('textarea[placeholder*="Message"]', message, { delay: 50 });
     await page.waitForFunction(() => {
       const btn = document.querySelector('button[aria-label="Send a message..."]');
@@ -442,20 +444,39 @@ app.get('/session-message', async (req, res) => {
     }, { timeout: 30000 });
     await page.click('button[aria-label="Send a message..."]');
 
-    // Wait 6 seconds to ensure bot reply appears
-    await new Promise(r => setTimeout(r, 6000));
+    // 9. Wait for bot to reply (detecting new message count)
+    await page.waitForFunction((count) => {
+      const msgs = document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light');
+      return msgs.length > count;
+    }, { timeout: 60000 }, initialCount);
 
-    // Fetch only new messages
-    const newMessages = await page.evaluate((initialCount) => {
-      const all = Array.from(document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light'));
-      return all.slice(initialCount).map(m => m.innerText.trim());
-    }, initialCount);
+    // 10. Wait until message stops updating (typing finished)
+    let lastText = "";
+    let stableCount = 0;
+    while (stableCount < 3) { // stable for ~1.5s
+      const currentText = await page.evaluate(() => {
+        const msgs = document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light');
+        return msgs[0]?.innerText.trim() || "";
+      });
+      if (currentText === lastText) {
+        stableCount++;
+      } else {
+        stableCount = 0;
+        lastText = currentText;
+      }
+      await new Promise(r => setTimeout(r, 500));
+    }
 
-    const reply = newMessages.length > 0 ? newMessages[newMessages.length - 1] : null;
+    // 11. Get latest reply (newest is at index 0)
+    const reply = await page.evaluate(() => {
+      const msgs = document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light');
+      return msgs[0]?.innerText.trim() || null;
+    });
 
+    // 12. Store session
     const uid = Math.random().toString(36).substring(2, 10);
     globalThis.sessions = globalThis.sessions || {};
-    globalThis.sessions[uid] = { browser, page, messageCount: initialCount + newMessages.length };
+    globalThis.sessions[uid] = { browser, page, messageCount: initialCount + 1 };
 
     res.json({ uid, reply });
 
