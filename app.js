@@ -523,12 +523,12 @@ app.get('/session-message', async (req, res) => {
       return botMsgs[0] || null;
     }, message);
 
-    // 12. Store session
+    // 7. Store session
     const uid = Math.random().toString(36).substring(2, 10);
     globalThis.sessions = globalThis.sessions || {};
     
     // Update session message count to current total
-    const newCount = await page.$$eval(
+    const newCount = await page.$eval(
       'div[data-testid="completed-message"] div.font-display.font-light',
       msgs => msgs.length
     );
@@ -541,7 +541,6 @@ app.get('/session-message', async (req, res) => {
     res.status(500).send('Error: ' + err.message);
   }
 });
-
 app.get('/session-message-continue', async (req, res) => {
   const { uid, message } = req.query;
   if (!uid) return res.status(400).send('Missing uid');
