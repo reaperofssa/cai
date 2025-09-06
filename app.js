@@ -520,7 +520,7 @@ app.get('/session-message-continue', async (req, res) => {
     // 1. Wait for input to be ready
     await page.waitForSelector('textarea[placeholder*="Message"]', { visible: true, timeout: 60000 });
 
-    // 2. Count messages again to handle updates
+    // 2. Count messages again before sending
     const prevCount = await page.$$eval(
       'div[data-testid="completed-message"] div.font-display.font-light',
       msgs => msgs.length
@@ -534,7 +534,7 @@ app.get('/session-message-continue', async (req, res) => {
     }, { timeout: 30000 });
     await page.click('button[aria-label="Send a message..."]');
 
-    // 4. Wait for bot reply
+    // 4. Wait for bot reply to appear (new messages)
     await page.waitForFunction(
       (count) => {
         return document.querySelectorAll(
@@ -545,17 +545,18 @@ app.get('/session-message-continue', async (req, res) => {
       prevCount
     );
 
-    // 5. Wait until bot reply stops updating
+    // 5. Wait until the latest bot message stops streaming
     let lastText = '';
     let stableCount = 0;
-    while (stableCount < 3) {
+    while (stableCount < 3) { // ~1.5s stable
       const currentText = await page.evaluate((userMsg, prevCount) => {
         const allMsgs = Array.from(
           document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light')
-        )
-          .map(el => el.innerText.trim())
-          .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase()); // skip user message
-        return allMsgs[0] || '';
+        );
+        const newMsgs = allMsgs.slice(prevCount); // only new messages
+        const botMsgs = newMsgs.map(el => el.innerText.trim())
+                               .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase());
+        return botMsgs[0] || '';
       }, message, prevCount);
 
       if (currentText === lastText) stableCount++;
@@ -571,14 +572,15 @@ app.get('/session-message-continue', async (req, res) => {
     const reply = await page.evaluate((userMsg, prevCount) => {
       const allMsgs = Array.from(
         document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light')
-      )
-        .map(el => el.innerText.trim())
-        .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase());
-      return allMsgs[0] || null;
+      );
+      const newMsgs = allMsgs.slice(prevCount);
+      const botMsgs = newMsgs.map(el => el.innerText.trim())
+                             .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase());
+      return botMsgs[0] || null;
     }, message, prevCount);
 
-    // 7. Update message count
-    session.messageCount = prevCount;
+    // 7. Update session message count
+    session.messageCount = prevCount + 1;
 
     res.json({ uid, reply });
 
