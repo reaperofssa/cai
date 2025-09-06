@@ -447,27 +447,30 @@ app.get('/session-message', async (req, res) => {
     }, { timeout: 30000 });
     await page.click('button[aria-label="Send a message..."]');
 
-    // 9. Wait for bot reply to appear
+    // 9. Wait for bot reply to appear (at least 2 new messages: yours + bot's)
     await page.waitForFunction(
       (count) => {
         return document.querySelectorAll(
           'div[data-testid="completed-message"] div.font-display.font-light'
-        ).length > count;
+        ).length >= count + 2;
       },
       { timeout: 60000 },
       initialCount
     );
 
-    // 10. Wait until message stops streaming
+    // 10. Wait until top bot message stops changing
     let lastText = '';
     let stableCount = 0;
     while (stableCount < 3) {
-      const currentText = await page.evaluate(() => {
-        const allMsgs = document.querySelectorAll(
-          'div[data-testid="completed-message"] div.font-display.font-light'
-        );
-        return allMsgs[0]?.innerText.trim() || '';
-      });
+      const currentText = await page.evaluate((userMsg) => {
+        const allMsgs = Array.from(
+          document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light')
+        )
+          .map(el => el.innerText.trim())
+          .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase()); // skip user message
+
+        return allMsgs[0] || '';
+      }, message);
 
       if (currentText === lastText) {
         stableCount++;
@@ -478,13 +481,16 @@ app.get('/session-message', async (req, res) => {
       await new Promise(r => setTimeout(r, 500));
     }
 
-    // 11. Get newest bot reply (top of the list)
-    const reply = await page.evaluate(() => {
+    // 11. Get newest bot reply ignoring user's own message
+    const reply = await page.evaluate((userMsg) => {
       const allMsgs = Array.from(
         document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light')
-      );
-      return allMsgs.length > 0 ? allMsgs[0].innerText.trim() : null;
-    });
+      )
+        .map(el => el.innerText.trim())
+        .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase()); // skip user message
+
+      return allMsgs[0] || null;
+    }, message);
 
     // 12. Store session
     const uid = Math.random().toString(36).substring(2, 10);
