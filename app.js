@@ -429,10 +429,7 @@ app.get('/session-message', async (req, res) => {
     );
 
     // 6. Wait for input
-    await page.waitForSelector('textarea[placeholder*="Message"]', {
-      visible: true,
-      timeout: 60000
-    });
+    await page.waitForSelector('textarea[placeholder*="Message"]', { visible: true, timeout: 60000 });
 
     // 7. Count messages before sending
     const initialCount = await page.$$eval(
@@ -448,34 +445,29 @@ app.get('/session-message', async (req, res) => {
     }, { timeout: 30000 });
     await page.click('button[aria-label="Send a message..."]');
 
-    // 9. Wait for bot reply to appear (at least 2 new messages: yours + bot's)
+    // 9. Wait for at least 1 new message
     await page.waitForFunction(
-      (count) => {
-        return document.querySelectorAll(
-          'div[data-testid="completed-message"] div.font-display.font-light'
-        ).length >= count + 2;
-      },
+      (count) => document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light').length > count,
       { timeout: 60000 },
       initialCount
     );
 
-    // 10. Wait until top bot message stops changing
+    // 10. Wait until top bot message stops changing (~1.5s stable)
     let lastText = '';
     let stableCount = 0;
     while (stableCount < 3) {
-      const currentText = await page.evaluate((userMsg) => {
-        const allMsgs = Array.from(
-          document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light')
-        )
-          .map(el => el.innerText.trim())
-          .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase());
+      const currentText = await page.evaluate((userMsg, prevCount) => {
+        const allMsgs = Array.from(document.querySelectorAll(
+          'div[data-testid="completed-message"] div.font-display.font-light'
+        ));
+        const newMsgs = allMsgs.slice(prevCount); // only new messages
+        const botMsgs = newMsgs.map(el => el.innerText.trim())
+                               .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase());
+        return botMsgs[0] || '';
+      }, message, initialCount);
 
-        return allMsgs[0] || '';
-      }, message);
-
-      if (currentText === lastText) {
-        stableCount++;
-      } else {
+      if (currentText === lastText) stableCount++;
+      else {
         stableCount = 0;
         lastText = currentText;
       }
@@ -483,15 +475,15 @@ app.get('/session-message', async (req, res) => {
     }
 
     // 11. Get newest bot reply ignoring user's own message
-    const reply = await page.evaluate((userMsg) => {
-      const allMsgs = Array.from(
-        document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light')
-      )
-        .map(el => el.innerText.trim())
-        .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase());
-
-      return allMsgs[0] || null;
-    }, message);
+    const reply = await page.evaluate((userMsg, prevCount) => {
+      const allMsgs = Array.from(document.querySelectorAll(
+        'div[data-testid="completed-message"] div.font-display.font-light'
+      ));
+      const newMsgs = allMsgs.slice(prevCount);
+      const botMsgs = newMsgs.map(el => el.innerText.trim())
+                             .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase());
+      return botMsgs[0] || null;
+    }, message, initialCount);
 
     // 12. Store session
     const uid = Math.random().toString(36).substring(2, 10);
