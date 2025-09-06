@@ -432,7 +432,7 @@ app.get('/session-message', async (req, res) => {
     await page.waitForSelector('textarea[placeholder*="Message"]', { visible: true, timeout: 60000 });
 
     // 7. Count messages before sending
-    const initialCount = await page.$$eval(
+    const prevCount = await page.$$eval(
       'div[data-testid="completed-message"] div.font-display.font-light',
       msgs => msgs.length
     );
@@ -445,50 +445,58 @@ app.get('/session-message', async (req, res) => {
     }, { timeout: 30000 });
     await page.click('button[aria-label="Send a message..."]');
 
-    // 9. Wait for at least 1 new message
+    // 9. Wait for bot reply to appear (at least 2 new messages: user's + bot's)
     await page.waitForFunction(
-      (count) => document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light').length > count,
+      (count) => {
+        return document.querySelectorAll(
+          'div[data-testid="completed-message"] div.font-display.font-light'
+        ).length >= count + 2;
+      },
       { timeout: 60000 },
-      initialCount
+      prevCount
     );
 
-  // 10. Wait until top bot message stops changing (~1.5s stable)
-let lastText = '';
-let stableCount = 0;
-while (stableCount < 3) {
-  const currentText = await page.evaluate((userMsg, prevCount) => {
-    const allMsgs = Array.from(document.querySelectorAll(
-      'div[data-testid="completed-message"] div.font-display.font-light'
-    ));
-    const newMsgs = allMsgs.slice(prevCount); // only new messages
-    const botMsgs = newMsgs.map(el => el.innerText.trim())
-                           .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase());
-    return botMsgs[botMsgs.length - 1] || ''; // <-- last message instead of first
-  }, message, initialCount);
+    // 10. Wait until top bot message stops changing (~1.5s stable)
+    let lastText = '';
+    let stableCount = 0;
+    while (stableCount < 3) {
+      const currentText = await page.evaluate((userMsg) => {
+        const allMsgs = Array.from(
+          document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light')
+        )
+          .map(el => el.innerText.trim())
+          .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase()); // skip user message
+        return allMsgs[0] || '';
+      }, message);
 
-  if (currentText === lastText) stableCount++;
-  else {
-    stableCount = 0;
-    lastText = currentText;
-  }
-  await new Promise(r => setTimeout(r, 500));
-}
+      if (currentText === lastText) stableCount++;
+      else {
+        stableCount = 0;
+        lastText = currentText;
+      }
+      await new Promise(r => setTimeout(r, 1200)); // Match the continue endpoint timing
+    }
 
-// 11. Get newest bot reply ignoring user's own message
-const reply = await page.evaluate((userMsg, prevCount) => {
-  const allMsgs = Array.from(document.querySelectorAll(
-    'div[data-testid="completed-message"] div.font-display.font-light'
-  ));
-  const newMsgs = allMsgs.slice(prevCount);
-  const botMsgs = newMsgs.map(el => el.innerText.trim())
-                         .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase());
-  return botMsgs[botMsgs.length - 1] || null; // <-- last new message
-}, message, initialCount);
+    // 11. Get newest bot reply ignoring user's message
+    const reply = await page.evaluate((userMsg) => {
+      const allMsgs = Array.from(
+        document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light')
+      )
+        .map(el => el.innerText.trim())
+        .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase()); // skip user message
+      return allMsgs[0] || null;
+    }, message);
 
     // 12. Store session
     const uid = Math.random().toString(36).substring(2, 10);
     globalThis.sessions = globalThis.sessions || {};
-    globalThis.sessions[uid] = { browser, page, messageCount: initialCount + 1 };
+    
+    // Update session message count to current total
+    const newCount = await page.$$eval(
+      'div[data-testid="completed-message"] div.font-display.font-light',
+      msgs => msgs.length
+    );
+    globalThis.sessions[uid] = { browser, page, messageCount: newCount };
 
     res.json({ uid, reply });
 
@@ -497,6 +505,7 @@ const reply = await page.evaluate((userMsg, prevCount) => {
     res.status(500).send('Error: ' + err.message);
   }
 });
+
 app.get('/session-message-continue', async (req, res) => {
   const { uid, message } = req.query;
   if (!uid) return res.status(400).send('Missing uid');
