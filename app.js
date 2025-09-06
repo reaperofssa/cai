@@ -514,19 +514,19 @@ app.get('/session-message-continue', async (req, res) => {
   const session = globalThis.sessions[uid];
   if (!session) return res.status(404).send('Session not found');
 
-  const { page, messageCount: initialCount } = session;
+  const { page } = session;
 
   try {
     // 1. Wait for input to be ready
     await page.waitForSelector('textarea[placeholder*="Message"]', { visible: true, timeout: 60000 });
 
-    // 2. Count messages again before sending
+    // 2. Count messages before sending
     const prevCount = await page.$$eval(
       'div[data-testid="completed-message"] div.font-display.font-light',
       msgs => msgs.length
     );
 
-    // 3. Send message
+    // 3. Send user message
     await page.type('textarea[placeholder*="Message"]', message, { delay: 50 });
     await page.waitForFunction(() => {
       const btn = document.querySelector('button[aria-label="Send a message..."]');
@@ -534,53 +534,51 @@ app.get('/session-message-continue', async (req, res) => {
     }, { timeout: 30000 });
     await page.click('button[aria-label="Send a message..."]');
 
-    // 4. Wait for bot reply to appear (new messages)
+    // 4. Wait for at least one new message to appear
     await page.waitForFunction(
-      (count) => {
-        return document.querySelectorAll(
-          'div[data-testid="completed-message"] div.font-display.font-light'
-        ).length > count;
-      },
+      (count) => document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light').length > count,
       { timeout: 60000 },
       prevCount
     );
 
-    // 5. Wait until the latest bot message stops streaming
+    // 5. Wait until the top bot message stops changing (~1.5s stable)
     let lastText = '';
     let stableCount = 0;
-    while (stableCount < 3) { // ~1.5s stable
-      const currentText = await page.evaluate((userMsg, prevCount) => {
-        const allMsgs = Array.from(
-          document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light')
-        );
-        const newMsgs = allMsgs.slice(prevCount); // only new messages
-        const botMsgs = newMsgs.map(el => el.innerText.trim())
+    while (stableCount < 3) {
+      const currentText = await page.evaluate((userMsg) => {
+        const allMsgs = Array.from(document.querySelectorAll(
+          'div[data-testid="completed-message"] div.font-display.font-light'
+        ));
+        // ignore user message, pick top-most bot message
+        const botMsgs = allMsgs.map(el => el.innerText.trim())
                                .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase());
         return botMsgs[0] || '';
-      }, message, prevCount);
+      }, message);
 
       if (currentText === lastText) stableCount++;
       else {
         stableCount = 0;
         lastText = currentText;
       }
-
       await new Promise(r => setTimeout(r, 500));
     }
 
     // 6. Get newest bot reply ignoring user's message
-    const reply = await page.evaluate((userMsg, prevCount) => {
-      const allMsgs = Array.from(
-        document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light')
-      );
-      const newMsgs = allMsgs.slice(prevCount);
-      const botMsgs = newMsgs.map(el => el.innerText.trim())
+    const reply = await page.evaluate((userMsg) => {
+      const allMsgs = Array.from(document.querySelectorAll(
+        'div[data-testid="completed-message"] div.font-display.font-light'
+      ));
+      const botMsgs = allMsgs.map(el => el.innerText.trim())
                              .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase());
       return botMsgs[0] || null;
-    }, message, prevCount);
+    }, message);
 
     // 7. Update session message count
-    session.messageCount = prevCount + 1;
+    const newCount = await page.$$eval(
+      'div[data-testid="completed-message"] div.font-display.font-light',
+      msgs => msgs.length
+    );
+    session.messageCount = newCount;
 
     res.json({ uid, reply });
 
