@@ -541,6 +541,7 @@ app.get('/session-message', async (req, res) => {
     res.status(500).send('Error: ' + err.message);
   }
 });
+
 app.get('/session-message-continue', async (req, res) => {
   const { uid, message } = req.query;
   if (!uid) return res.status(400).send('Missing uid');
