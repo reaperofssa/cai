@@ -450,22 +450,15 @@ app.get('/session-message', async (req, res) => {
       return msgs.length > count;
     }, { timeout: 60000 }, initialCount);
 
-    // 10. Wait until message stops updating (typing finished)
-    let lastText = "";
-    let stableCount = 0;
-    while (stableCount < 3) { // stable for ~1.5s
-      const currentText = await page.evaluate(() => {
-        const msgs = document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light');
-        return msgs[0]?.innerText.trim() || "";
-      });
-      if (currentText === lastText) {
-        stableCount++;
-      } else {
-        stableCount = 0;
-        lastText = currentText;
-      }
-      await new Promise(r => setTimeout(r, 500));
-    }
+    // 10. Wait until the typing/streaming indicator disappears
+    await page.waitForFunction(() => {
+      const latestMessage = document.querySelector('div[data-testid="completed-message"]');
+      if (!latestMessage) return false;
+
+      // Look for elements that indicate streaming
+      const typingIndicator = latestMessage.querySelector('svg, .animate-pulse, .typing, .loader');
+      return !typingIndicator;
+    }, { timeout: 120000 });
 
     // 11. Get latest reply (newest is at index 0)
     const reply = await page.evaluate(() => {
