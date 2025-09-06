@@ -456,17 +456,35 @@ app.get('/session-message', async (req, res) => {
       prevCount
     );
 
-    // 10. Wait until top bot message stops changing (~1.5s stable)
+    // 10. Wait until the latest bot message stops changing (~1.5s stable)
     let lastText = '';
     let stableCount = 0;
     while (stableCount < 3) {
       const currentText = await page.evaluate((userMsg) => {
         const allMsgs = Array.from(
           document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light')
-        )
-          .map(el => el.innerText.trim())
-          .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase()); // skip user message
-        return allMsgs[0] || '';
+        );
+        
+        // Get all message texts
+        const msgTexts = allMsgs.map(el => el.innerText.trim());
+        
+        // Find the last occurrence of the user message
+        let userMsgIndex = -1;
+        for (let i = msgTexts.length - 1; i >= 0; i--) {
+          if (msgTexts[i].toLowerCase() === userMsg.toLowerCase()) {
+            userMsgIndex = i;
+            break;
+          }
+        }
+        
+        // Get the message right after the user's message (the bot's response)
+        if (userMsgIndex !== -1 && userMsgIndex + 1 < msgTexts.length) {
+          return msgTexts[userMsgIndex + 1];
+        }
+        
+        // Fallback: filter out user messages and get the first one
+        const botMsgs = msgTexts.filter(text => text && text.toLowerCase() !== userMsg.toLowerCase());
+        return botMsgs[0] || '';
       }, message);
 
       if (currentText === lastText) stableCount++;
@@ -474,17 +492,35 @@ app.get('/session-message', async (req, res) => {
         stableCount = 0;
         lastText = currentText;
       }
-      await new Promise(r => setTimeout(r, 1200)); // Match the continue endpoint timing
+      await new Promise(r => setTimeout(r, 1200));
     }
 
-    // 11. Get newest bot reply ignoring user's message
+    // 11. Get newest bot reply - the message right after user's message
     const reply = await page.evaluate((userMsg) => {
       const allMsgs = Array.from(
         document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light')
-      )
-        .map(el => el.innerText.trim())
-        .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase()); // skip user message
-      return allMsgs[0] || null;
+      );
+      
+      // Get all message texts
+      const msgTexts = allMsgs.map(el => el.innerText.trim());
+      
+      // Find the last occurrence of the user message
+      let userMsgIndex = -1;
+      for (let i = msgTexts.length - 1; i >= 0; i--) {
+        if (msgTexts[i].toLowerCase() === userMsg.toLowerCase()) {
+          userMsgIndex = i;
+          break;
+        }
+      }
+      
+      // Get the message right after the user's message (the bot's response)
+      if (userMsgIndex !== -1 && userMsgIndex + 1 < msgTexts.length) {
+        return msgTexts[userMsgIndex + 1];
+      }
+      
+      // Fallback: filter out user messages and get the first one
+      const botMsgs = msgTexts.filter(text => text && text.toLowerCase() !== userMsg.toLowerCase());
+      return botMsgs[0] || null;
     }, message);
 
     // 12. Store session
