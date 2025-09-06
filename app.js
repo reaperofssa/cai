@@ -504,6 +504,89 @@ app.get('/session-message', async (req, res) => {
     res.status(500).send('Error: ' + err.message);
   }
 });
+
+app.get('/session-message-continue', async (req, res) => {
+  const { uid, message } = req.query;
+  if (!uid) return res.status(400).send('Missing uid');
+  if (!message) return res.status(400).send('Missing message');
+
+  globalThis.sessions = globalThis.sessions || {};
+  const session = globalThis.sessions[uid];
+  if (!session) return res.status(404).send('Session not found');
+
+  const { page, messageCount: initialCount } = session;
+
+  try {
+    // 1. Wait for input to be ready
+    await page.waitForSelector('textarea[placeholder*="Message"]', { visible: true, timeout: 60000 });
+
+    // 2. Count messages again to handle updates
+    const prevCount = await page.$$eval(
+      'div[data-testid="completed-message"] div.font-display.font-light',
+      msgs => msgs.length
+    );
+
+    // 3. Send message
+    await page.type('textarea[placeholder*="Message"]', message, { delay: 50 });
+    await page.waitForFunction(() => {
+      const btn = document.querySelector('button[aria-label="Send a message..."]');
+      return btn && !btn.disabled;
+    }, { timeout: 30000 });
+    await page.click('button[aria-label="Send a message..."]');
+
+    // 4. Wait for bot reply
+    await page.waitForFunction(
+      (count) => {
+        return document.querySelectorAll(
+          'div[data-testid="completed-message"] div.font-display.font-light'
+        ).length > count;
+      },
+      { timeout: 60000 },
+      prevCount
+    );
+
+    // 5. Wait until bot reply stops updating
+    let lastText = '';
+    let stableCount = 0;
+    while (stableCount < 3) {
+      const currentText = await page.evaluate((userMsg, prevCount) => {
+        const allMsgs = Array.from(
+          document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light')
+        )
+          .map(el => el.innerText.trim())
+          .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase()); // skip user message
+        return allMsgs[0] || '';
+      }, message, prevCount);
+
+      if (currentText === lastText) stableCount++;
+      else {
+        stableCount = 0;
+        lastText = currentText;
+      }
+
+      await new Promise(r => setTimeout(r, 500));
+    }
+
+    // 6. Get newest bot reply ignoring user's message
+    const reply = await page.evaluate((userMsg, prevCount) => {
+      const allMsgs = Array.from(
+        document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light')
+      )
+        .map(el => el.innerText.trim())
+        .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase());
+      return allMsgs[0] || null;
+    }, message, prevCount);
+
+    // 7. Update message count
+    session.messageCount = prevCount;
+
+    res.json({ uid, reply });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error: ' + err.message);
+  }
+});
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`)
 })
