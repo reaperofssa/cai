@@ -423,13 +423,16 @@ app.get('/session-message', async (req, res) => {
     });
 
     // 5. Open chat page using chatId
-    await page.goto(
-      `https://character.ai/chat/${chatId}`,
-      { waitUntil: 'domcontentloaded', timeout: 60000 }
-    );
+    await page.goto(`https://character.ai/chat/${chatId}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60000
+    });
 
     // 6. Wait for input
-    await page.waitForSelector('textarea[placeholder*="Message"]', { visible: true, timeout: 60000 });
+    await page.waitForSelector('textarea[placeholder*="Message"]', {
+      visible: true,
+      timeout: 60000
+    });
 
     // 7. Count messages before sending
     const initialCount = await page.$$eval(
@@ -457,7 +460,7 @@ app.get('/session-message', async (req, res) => {
       msgs => msgs.length
     );
 
-    // 10. Wait until top bot message stops changing (~1.5s stable)
+    // 10. Wait until top bot message stops changing
     let lastText = '';
     let stableCount = 0;
     while (stableCount < 3) {
@@ -465,7 +468,7 @@ app.get('/session-message', async (req, res) => {
         const allMsgs = Array.from(document.querySelectorAll(
           'div[data-testid="completed-message"] div.font-display.font-light'
         ));
-        const newMsgs = allMsgs.slice(prevCount); // only new messages
+        const newMsgs = allMsgs.slice(prevCount);
         const botMsgs = newMsgs.map(el => el.innerText.trim())
                                .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase());
         return botMsgs[0] || '';
@@ -490,10 +493,27 @@ app.get('/session-message', async (req, res) => {
       return botMsgs[0] || null;
     }, message, initialCount);
 
-    // 12. Store session
+    // 12. Store session with cleanup timer
     const uid = Math.random().toString(36).substring(2, 10);
     globalThis.sessions = globalThis.sessions || {};
-    globalThis.sessions[uid] = { browser, page, messageCount: postReloadCount };
+    globalThis.sessions[uid] = {
+      browser,
+      page,
+      messageCount: postReloadCount,
+      lastUsed: Date.now(),
+      profileDir: tempDir
+    };
+
+    // Auto-close after 10 minutes of inactivity
+    setTimeout(() => {
+      const s = globalThis.sessions[uid];
+      if (s && Date.now() - s.lastUsed >= 10 * 60 * 1000) {
+        s.browser.close().catch(() => {});
+        fs.rmSync(s.profileDir, { recursive: true, force: true });
+        delete globalThis.sessions[uid];
+        console.log(`Session ${uid} closed after 10 minutes inactivity`);
+      }
+    }, 10 * 60 * 1000);
 
     res.json({ uid, reply });
 
@@ -502,14 +522,18 @@ app.get('/session-message', async (req, res) => {
     res.status(500).send('Error: ' + err.message);
   }
 });
+
 app.get('/session-message-continue', async (req, res) => {
   const { uid, message } = req.query;
-  if (!uid) return res.status(400).send('Missing uid');
-  if (!message) return res.status(400).send('Missing message');
+  if (!uid) return res.status(400).json({ error: 'Missing uid' });
+  if (!message) return res.status(400).json({ error: 'Missing message' });
 
   globalThis.sessions = globalThis.sessions || {};
   const session = globalThis.sessions[uid];
-  if (!session) return res.status(404).send('Session not found');
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+
+  // Refresh lastUsed so this session doesn't auto-close
+  session.lastUsed = Date.now();
 
   const { page } = session;
 
@@ -584,7 +608,7 @@ app.get('/session-message-continue', async (req, res) => {
 
   } catch (err) {
     console.error(err);
-    res.status(500).send('Error: ' + err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 app.listen(PORT, () => {
