@@ -18,17 +18,26 @@ const ZIP_FILE = 'profile.zip'
 const HTML_FILE = 'page.html'
 const SCREENSHOT_FILE = 'screenshot.png'
 
-// Keep browser instance alive for reuse
-let globalBrowser = null;
+// Keep browser instances alive for reuse - keyed by userDataDir
+const browserPool = new Map();
 
 async function getOrCreateBrowser(userDataDir) {
-  if (globalBrowser && globalBrowser.isConnected()) {
-    return globalBrowser;
+  const key = userDataDir || PROFILE_DIR;
+  
+  // Check if browser exists and is still connected
+  if (browserPool.has(key)) {
+    const browser = browserPool.get(key);
+    if (browser.isConnected()) {
+      return browser;
+    } else {
+      browserPool.delete(key);
+    }
   }
   
-  globalBrowser = await puppeteer.launch({
+  // Launch new browser
+  const browser = await puppeteer.launch({
     headless: true,
-    userDataDir: userDataDir || PROFILE_DIR,
+    userDataDir: key,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -37,14 +46,15 @@ async function getOrCreateBrowser(userDataDir) {
       '--disable-features=IsolateOrigins,site-per-process',
       '--disable-gpu',
       '--disable-software-rasterizer',
-      '--single-process', // Faster startup
+      '--single-process',
       '--no-zygote',
       '--disable-extensions',
       '--disable-default-apps'
     ]
   });
   
-  return globalBrowser;
+  browserPool.set(key, browser);
+  return browser;
 }
 
 // Lightweight stealth - only essential overrides
@@ -157,6 +167,7 @@ app.get('/session-screenshot', async (req, res) => {
 
   const tempDir = path.join(os.tmpdir(), 'pupp_profile_' + Date.now())
   fs.mkdirSync(tempDir, { recursive: true })
+  let browser = null;
 
   try {
     const response = await axios.get(profile, { responseType: 'arraybuffer', timeout: 30000 })
@@ -166,7 +177,8 @@ app.get('/session-screenshot', async (req, res) => {
     const zip = new AdmZip(zipPath)
     zip.extractAllTo(tempDir, true)
 
-    const browser = await puppeteer.launch({
+    // Don't use browser pooling for one-off screenshots
+    browser = await puppeteer.launch({
       headless: true,
       userDataDir: tempDir,
       args: [
@@ -174,7 +186,9 @@ app.get('/session-screenshot', async (req, res) => {
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--single-process',
-        '--no-zygote'
+        '--no-zygote',
+        '--disable-extensions',
+        '--disable-default-apps'
       ]
     })
 
@@ -185,18 +199,24 @@ app.get('/session-screenshot', async (req, res) => {
 
     await page.goto('https://character.ai/', { waitUntil: 'domcontentloaded', timeout: 30000 })
     await quickHumanActions(page)
-    await new Promise(r => setTimeout(r, 3000)) // Reduced from 10s
+    await new Promise(r => setTimeout(r, 3000))
 
     const screenshotPath = path.join(tempDir, 'screenshot.png')
     await page.screenshot({ path: screenshotPath, fullPage: false })
 
     await browser.close()
+    browser = null;
 
     const screenshotUrl = await uploadToCatbox(screenshotPath)
+
+    // Cleanup temp dir
+    fs.rmSync(tempDir, { recursive: true, force: true });
 
     res.json({ screenshot: screenshotUrl })
   } catch (err) {
     console.error(err)
+    if (browser) await browser.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
     res.status(500).send('Error: ' + err.message)
   }
 })
@@ -217,7 +237,7 @@ app.get('/session-message', async (req, res) => {
     fs.writeFileSync(zipPath, response.data);
     new AdmZip(zipPath).extractAllTo(tempDir, true);
 
-    // Launch browser
+    // Launch browser (don't use pool - each session gets unique temp profile)
     const browser = await puppeteer.launch({
       headless: true,
       userDataDir: tempDir,
@@ -226,7 +246,9 @@ app.get('/session-message', async (req, res) => {
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--single-process',
-        '--no-zygote'
+        '--no-zygote',
+        '--disable-extensions',
+        '--disable-default-apps'
       ]
     });
 
@@ -248,7 +270,7 @@ app.get('/session-message', async (req, res) => {
     });
 
     // Count messages before
-    const initialCount = await page.$$eval(
+    const initialCount = await page.$eval(
       'div[data-testid="completed-message"] div.font-display.font-light',
       msgs => msgs.length
     );
@@ -268,7 +290,7 @@ app.get('/session-message', async (req, res) => {
     // Wait for stable reply - reduced polling
     let lastText = '';
     let stableCount = 0;
-    while (stableCount < 2) { // Reduced from 3
+    while (stableCount < 2) {
       const currentText = await page.evaluate((userMsg, prevCount) => {
         const allMsgs = Array.from(document.querySelectorAll(
           'div[data-testid="completed-message"] div.font-display.font-light'
@@ -284,7 +306,7 @@ app.get('/session-message', async (req, res) => {
         stableCount = 0;
         lastText = currentText;
       }
-      await new Promise(r => setTimeout(r, 800)); // Reduced from 500 but check less often
+      await new Promise(r => setTimeout(r, 800));
     }
 
     // Get reply
@@ -298,7 +320,7 @@ app.get('/session-message', async (req, res) => {
       return botMsgs[0] || null;
     }, message, initialCount);
 
-    const postReloadCount = await page.$$eval(
+    const postReloadCount = await page.$eval(
       'div[data-testid="completed-message"] div.font-display.font-light',
       msgs => msgs.length
     );
