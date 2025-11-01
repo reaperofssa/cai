@@ -18,10 +18,61 @@ const ZIP_FILE = 'profile.zip'
 const HTML_FILE = 'page.html'
 const SCREENSHOT_FILE = 'screenshot.png'
 
-async function zipProfile() {
+// Keep browser instance alive for reuse
+let globalBrowser = null;
+
+async function getOrCreateBrowser(userDataDir) {
+  if (globalBrowser && globalBrowser.isConnected()) {
+    return globalBrowser;
+  }
+  
+  globalBrowser = await puppeteer.launch({
+    headless: true,
+    userDataDir: userDataDir || PROFILE_DIR,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-blink-features=AutomationControlled',
+      '--disable-features=IsolateOrigins,site-per-process',
+      '--disable-gpu',
+      '--disable-software-rasterizer',
+      '--single-process', // Faster startup
+      '--no-zygote',
+      '--disable-extensions',
+      '--disable-default-apps'
+    ]
+  });
+  
+  return globalBrowser;
+}
+
+// Lightweight stealth - only essential overrides
+async function applyMinimalStealth(page) {
+  await page.evaluateOnNewDocument(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+    Object.defineProperty(navigator, 'language', { get: () => 'en-US' });
+  });
+}
+
+// Simplified human actions - much faster
+async function quickHumanActions(page) {
+  for (let i = 0; i < 2; i++) {
+    await page.mouse.move(
+      Math.random() * 500 + 100,
+      Math.random() * 300 + 100,
+      { steps: 5 }
+    );
+    await new Promise(r => setTimeout(r, 300));
+  }
+}
+
+// Compress profile with lower compression for speed
+async function zipProfileFast() {
   return new Promise((resolve, reject) => {
     const output = fs.createWriteStream(ZIP_FILE)
-    const archive = archiver('zip', { zlib: { level: 9 } })
+    const archive = archiver('zip', { zlib: { level: 1 } }) // Fast compression
 
     output.on('close', () => resolve(ZIP_FILE))
     archive.on('error', err => reject(err))
@@ -38,7 +89,9 @@ async function uploadToCatbox(filePath) {
   form.append('fileToUpload', fs.createReadStream(filePath))
 
   const response = await axios.post('https://catbox.moe/user/api.php', form, {
-    headers: form.getHeaders()
+    headers: form.getHeaders(),
+    maxRedirects: 0,
+    timeout: 30000
   })
 
   return response.data
@@ -49,147 +102,38 @@ app.get('/q', async (req, res) => {
   if (!url) return res.status(400).send('Missing url')
 
   try {
-    const browser = await puppeteer.launch({
-      headless: true,
-      userDataDir: PROFILE_DIR,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-blink-features=AutomationControlled',
-        '--disable-features=IsolateOrigins,site-per-process',
-        '--flag-switches-begin --disable-site-isolation-trials --flag-switches-end'
-      ]
-    })
-
+    const browser = await getOrCreateBrowser(PROFILE_DIR);
     const page = await browser.newPage()
 
     const userAgents = [
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36',
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36',
-      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36'
     ]
     await page.setUserAgent(userAgents[Math.floor(Math.random() * userAgents.length)])
+    await page.setViewport({ width: 1280, height: 720, deviceScaleFactor: 1 })
+    await applyMinimalStealth(page);
 
-    await page.setViewport({
-      width: 1280 + Math.floor(Math.random() * 50),
-      height: 720 + Math.floor(Math.random() * 50),
-      deviceScaleFactor: 1
-    })
-
-    await page.setExtraHTTPHeaders({
-      'accept-language': 'en-US,en;q=0.9'
-    })
-
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
-      Object.defineProperty(navigator, 'platform', { get: () => 'Win32' })
-      Object.defineProperty(navigator, 'language', { get: () => 'en-US' })
-      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] })
-      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4] })
-      Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 })
-      Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 })
-      Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 })
-
-      const toDataURL = HTMLCanvasElement.prototype.toDataURL
-      HTMLCanvasElement.prototype.toDataURL = function () {
-        const ctx = this.getContext('2d')
-        ctx.fillStyle = 'rgba(255,255,255,0.01)'
-        ctx.fillRect(0, 0, this.width, this.height)
-        return toDataURL.apply(this, arguments)
-      }
-
-      const getImageData = CanvasRenderingContext2D.prototype.getImageData
-      CanvasRenderingContext2D.prototype.getImageData = function () {
-        const data = getImageData.apply(this, arguments)
-        for (let i = 0; i < data.data.length; i += 50) {
-          data.data[i] = data.data[i] ^ 0x01
-        }
-        return data
-      }
-
-      const getParameter = WebGLRenderingContext.prototype.getParameter
-      WebGLRenderingContext.prototype.getParameter = function (param) {
-        if (param === 37445) return 'Intel Inc.'
-        if (param === 37446) return 'Intel Iris OpenGL Engine'
-        return getParameter.call(this, param)
-      }
-
-      const getChannelData = AudioBuffer.prototype.getChannelData
-      AudioBuffer.prototype.getChannelData = function () {
-        const data = getChannelData.call(this)
-        for (let i = 0; i < data.length; i += 100) {
-          data[i] = data[i] + Math.random() * 0.00001
-        }
-        return data
-      }
-
-      const originalQuery = navigator.permissions.query
-      navigator.permissions.query = parameters =>
-        parameters.name === 'notifications'
-          ? Promise.resolve({ state: 'denied' })
-          : originalQuery(parameters)
-
-      const originalCreateOffer = RTCPeerConnection.prototype.createOffer
-      RTCPeerConnection.prototype.createOffer = function () {
-        return originalCreateOffer.apply(this, arguments)
-      }
-
-      const originalFonts = document.fonts
-      document.fonts = { check: () => true, ready: Promise.resolve(), ...originalFonts }
-
-      Intl.DateTimeFormat = function () {
-        return {
-          resolvedOptions: () => ({ timeZone: 'America/New_York' })
-        }
-      }
-
-      const origNow = performance.now
-      performance.now = function () {
-        return origNow.call(this) + Math.random() * 0.0001
-      }
-    })
-
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 })
-
-    async function humanLikeActions(page) {
-      const box = await page.evaluate(() => ({
-        width: window.innerWidth,
-        height: window.innerHeight
-      }))
-
-      for (let i = 0; i < 5; i++) {
-        const x = Math.floor(Math.random() * box.width)
-        const y = Math.floor(Math.random() * box.height)
-        await page.mouse.move(x, y, { steps: 10 + Math.floor(Math.random() * 20) })
-        if (Math.random() > 0.7) {
-          await page.mouse.click(x, y)
-        }
-        if (Math.random() > 0.5) {
-          await page.keyboard.press('ArrowDown')
-        }
-        if (Math.random() > 0.8) {
-          await page.evaluate(() => window.scrollBy(0, 100 + Math.floor(Math.random() * 200)))
-        }
-        await new Promise(r => setTimeout(r, 500 + Math.floor(Math.random() * 1000)))
-      }
-    }
-
-    await humanLikeActions(page)
-
-    await new Promise(r => setTimeout(r, 15000))
+    // Faster page load - domcontentloaded instead of networkidle2
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 })
+    
+    await quickHumanActions(page)
+    await new Promise(r => setTimeout(r, 5000)) // Reduced from 15s
 
     const finalUrl = page.url()
     if (finalUrl.startsWith('https://character.ai/')) {
       const html = await page.content()
       fs.writeFileSync(HTML_FILE, html)
-      await page.screenshot({ path: SCREENSHOT_FILE, fullPage: true })
-      await browser.close()
+      await page.screenshot({ path: SCREENSHOT_FILE, fullPage: false }) // Not full page
+      await page.close()
 
-      const zipPath = await zipProfile()
-      const profileUrl = await uploadToCatbox(zipPath)
-      const htmlUrl = await uploadToCatbox(HTML_FILE)
-      const screenshotUrl = await uploadToCatbox(SCREENSHOT_FILE)
+      const zipPath = await zipProfileFast()
+      
+      // Upload in parallel
+      const [profileUrl, htmlUrl, screenshotUrl] = await Promise.all([
+        uploadToCatbox(zipPath),
+        uploadToCatbox(HTML_FILE),
+        uploadToCatbox(SCREENSHOT_FILE)
+      ]);
 
       return res.json({
         profile: profileUrl,
@@ -198,7 +142,7 @@ app.get('/q', async (req, res) => {
         redirected: finalUrl
       })
     } else {
-      await browser.close()
+      await page.close()
       return res.json({ redirected: finalUrl, message: 'Did not match target redirect' })
     }
   } catch (err) {
@@ -215,7 +159,7 @@ app.get('/session-screenshot', async (req, res) => {
   fs.mkdirSync(tempDir, { recursive: true })
 
   try {
-    const response = await axios.get(profile, { responseType: 'arraybuffer' })
+    const response = await axios.get(profile, { responseType: 'arraybuffer', timeout: 30000 })
     const zipPath = path.join(tempDir, 'profile.zip')
     fs.writeFileSync(zipPath, response.data)
 
@@ -229,130 +173,22 @@ app.get('/session-screenshot', async (req, res) => {
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-blink-features=AutomationControlled',
-        '--disable-features=IsolateOrigins,site-per-process',
-        '--flag-switches-begin --disable-site-isolation-trials --flag-switches-end'
+        '--single-process',
+        '--no-zygote'
       ]
     })
 
     const page = await browser.newPage()
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+    await page.setViewport({ width: 1280, height: 720, deviceScaleFactor: 1 })
+    await applyMinimalStealth(page);
 
-    const userAgents = [
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36',
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36',
-      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36'
-    ]
-    await page.setUserAgent(userAgents[Math.floor(Math.random() * userAgents.length)])
-
-    await page.setViewport({
-      width: 1280 + Math.floor(Math.random() * 50),
-      height: 720 + Math.floor(Math.random() * 50),
-      deviceScaleFactor: 1
-    })
-
-    await page.setExtraHTTPHeaders({
-      'accept-language': 'en-US,en;q=0.9'
-    })
-
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
-      Object.defineProperty(navigator, 'platform', { get: () => 'Win32' })
-      Object.defineProperty(navigator, 'language', { get: () => 'en-US' })
-      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] })
-      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4] })
-      Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 })
-      Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 })
-      Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 })
-
-      const toDataURL = HTMLCanvasElement.prototype.toDataURL
-      HTMLCanvasElement.prototype.toDataURL = function () {
-        const ctx = this.getContext('2d')
-        ctx.fillStyle = 'rgba(255,255,255,0.01)'
-        ctx.fillRect(0, 0, this.width, this.height)
-        return toDataURL.apply(this, arguments)
-      }
-
-      const getImageData = CanvasRenderingContext2D.prototype.getImageData
-      CanvasRenderingContext2D.prototype.getImageData = function () {
-        const data = getImageData.apply(this, arguments)
-        for (let i = 0; i < data.data.length; i += 50) {
-          data.data[i] = data.data[i] ^ 0x01
-        }
-        return data
-      }
-
-      const getParameter = WebGLRenderingContext.prototype.getParameter
-      WebGLRenderingContext.prototype.getParameter = function (param) {
-        if (param === 37445) return 'Intel Inc.'
-        if (param === 37446) return 'Intel Iris OpenGL Engine'
-        return getParameter.call(this, param)
-      }
-
-      const getChannelData = AudioBuffer.prototype.getChannelData
-      AudioBuffer.prototype.getChannelData = function () {
-        const data = getChannelData.call(this)
-        for (let i = 0; i < data.length; i += 100) {
-          data[i] = data[i] + Math.random() * 0.00001
-        }
-        return data
-      }
-
-      const originalQuery = navigator.permissions.query
-      navigator.permissions.query = parameters =>
-        parameters.name === 'notifications'
-          ? Promise.resolve({ state: 'denied' })
-          : originalQuery(parameters)
-
-      const originalCreateOffer = RTCPeerConnection.prototype.createOffer
-      RTCPeerConnection.prototype.createOffer = function () {
-        return originalCreateOffer.apply(this, arguments)
-      }
-
-      const originalFonts = document.fonts
-      document.fonts = { check: () => true, ready: Promise.resolve(), ...originalFonts }
-
-      Intl.DateTimeFormat = function () {
-        return {
-          resolvedOptions: () => ({ timeZone: 'America/New_York' })
-        }
-      }
-
-      const origNow = performance.now
-      performance.now = function () {
-        return origNow.call(this) + Math.random() * 0.0001
-      }
-    })
-
-    await page.goto('https://character.ai/', { waitUntil: 'networkidle2', timeout: 60000 })
-
-    async function humanLikeActions(page) {
-      const box = await page.evaluate(() => ({
-        width: window.innerWidth,
-        height: window.innerHeight
-      }))
-
-      for (let i = 0; i < 5; i++) {
-        const x = Math.floor(Math.random() * box.width)
-        const y = Math.floor(Math.random() * box.height)
-        await page.mouse.move(x, y, { steps: 10 + Math.floor(Math.random() * 20) })
-        if (Math.random() > 0.7) {
-          await page.mouse.click(x, y)
-        }
-        if (Math.random() > 0.5) {
-          await page.keyboard.press('ArrowDown')
-        }
-        if (Math.random() > 0.8) {
-          await page.evaluate(() => window.scrollBy(0, 100 + Math.floor(Math.random() * 200)))
-        }
-        await new Promise(r => setTimeout(r, 500 + Math.floor(Math.random() * 1000)))
-      }
-    }
-
-    await humanLikeActions(page)
-    await new Promise(r => setTimeout(r, 10000))
+    await page.goto('https://character.ai/', { waitUntil: 'domcontentloaded', timeout: 30000 })
+    await quickHumanActions(page)
+    await new Promise(r => setTimeout(r, 3000)) // Reduced from 10s
 
     const screenshotPath = path.join(tempDir, 'screenshot.png')
-    await page.screenshot({ path: screenshotPath, fullPage: true })
+    await page.screenshot({ path: screenshotPath, fullPage: false })
 
     await browser.close()
 
@@ -375,13 +211,13 @@ app.get('/session-message', async (req, res) => {
   fs.mkdirSync(tempDir, { recursive: true });
 
   try {
-    // 1. Download and extract profile
-    const response = await axios.get(profile, { responseType: 'arraybuffer' });
+    // Download and extract profile
+    const response = await axios.get(profile, { responseType: 'arraybuffer', timeout: 30000 });
     const zipPath = path.join(tempDir, 'profile.zip');
     fs.writeFileSync(zipPath, response.data);
     new AdmZip(zipPath).extractAllTo(tempDir, true);
 
-    // 2. Launch Puppeteer
+    // Launch browser
     const browser = await puppeteer.launch({
       headless: true,
       userDataDir: tempDir,
@@ -389,81 +225,50 @@ app.get('/session-message', async (req, res) => {
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-blink-features=AutomationControlled',
-        '--disable-features=IsolateOrigins,site-per-process',
-        '--flag-switches-begin --disable-site-isolation-trials --flag-switches-end'
+        '--single-process',
+        '--no-zygote'
       ]
     });
 
     const page = await browser.newPage();
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
+    await page.setViewport({ width: 1280, height: 720, deviceScaleFactor: 1 });
+    await applyMinimalStealth(page);
 
-    // 3. Random UA
-    const userAgents = [
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36',
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36',
-      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36'
-    ];
-    await page.setUserAgent(userAgents[Math.floor(Math.random() * userAgents.length)]);
-    await page.setViewport({
-      width: 1280 + Math.floor(Math.random() * 50),
-      height: 720 + Math.floor(Math.random() * 50),
-      deviceScaleFactor: 1
-    });
-
-    // 4. Stealth patches
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-      Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
-      Object.defineProperty(navigator, 'language', { get: () => 'en-US' });
-      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4] });
-      Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
-      Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
-      Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 });
-    });
-
-    // 5. Open chat page using chatId
+    // Open chat page
     await page.goto(`https://character.ai/chat/${chatId}`, {
       waitUntil: 'domcontentloaded',
-      timeout: 60000
+      timeout: 30000
     });
 
-    // 6. Wait for input
+    // Wait for input
     await page.waitForSelector('textarea[placeholder*="Message"]', {
       visible: true,
-      timeout: 60000
+      timeout: 30000
     });
 
-    // 7. Count messages before sending
+    // Count messages before
     const initialCount = await page.$$eval(
       'div[data-testid="completed-message"] div.font-display.font-light',
       msgs => msgs.length
     );
 
-    // 8. Send message
-    await page.type('textarea[placeholder*="Message"]', message, { delay: 50 });
+    // Send message
+    await page.type('textarea[placeholder*="Message"]', message, { delay: 30 });
     await page.waitForFunction(() => {
       const btn = document.querySelector('button[aria-label="Send a message..."]');
       return btn && !btn.disabled;
-    }, { timeout: 30000 });
+    }, { timeout: 15000 });
     await page.click('button[aria-label="Send a message..."]');
 
-    // 8b. Refresh page twice before fetching reply
-    for (let i = 0; i < 2; i++) {
-      await page.reload({ waitUntil: 'networkidle2', timeout: 60000 });
-      await page.waitForSelector('textarea[placeholder*="Message"]', { visible: true, timeout: 60000 });
-    }
+    // Single reload instead of two
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForSelector('textarea[placeholder*="Message"]', { visible: true, timeout: 30000 });
 
-    // 9. Count messages after reloads
-    const postReloadCount = await page.$$eval(
-      'div[data-testid="completed-message"] div.font-display.font-light',
-      msgs => msgs.length
-    );
-
-    // 10. Wait until top bot message stops changing
+    // Wait for stable reply - reduced polling
     let lastText = '';
     let stableCount = 0;
-    while (stableCount < 3) {
+    while (stableCount < 2) { // Reduced from 3
       const currentText = await page.evaluate((userMsg, prevCount) => {
         const allMsgs = Array.from(document.querySelectorAll(
           'div[data-testid="completed-message"] div.font-display.font-light'
@@ -479,10 +284,10 @@ app.get('/session-message', async (req, res) => {
         stableCount = 0;
         lastText = currentText;
       }
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise(r => setTimeout(r, 800)); // Reduced from 500 but check less often
     }
 
-    // 11. Get newest bot reply ignoring user's own message
+    // Get reply
     const reply = await page.evaluate((userMsg, prevCount) => {
       const allMsgs = Array.from(document.querySelectorAll(
         'div[data-testid="completed-message"] div.font-display.font-light'
@@ -493,7 +298,12 @@ app.get('/session-message', async (req, res) => {
       return botMsgs[0] || null;
     }, message, initialCount);
 
-    // 12. Store session with cleanup timer
+    const postReloadCount = await page.$$eval(
+      'div[data-testid="completed-message"] div.font-display.font-light',
+      msgs => msgs.length
+    );
+
+    // Store session
     const uid = Math.random().toString(36).substring(2, 10);
     globalThis.sessions = globalThis.sessions || {};
     globalThis.sessions[uid] = {
@@ -504,14 +314,13 @@ app.get('/session-message', async (req, res) => {
       profileDir: tempDir
     };
 
-    // Auto-close after 10 minutes of inactivity
+    // Auto-close after 10 minutes
     setTimeout(() => {
       const s = globalThis.sessions[uid];
       if (s && Date.now() - s.lastUsed >= 10 * 60 * 1000) {
         s.browser.close().catch(() => {});
         fs.rmSync(s.profileDir, { recursive: true, force: true });
         delete globalThis.sessions[uid];
-        console.log(`Session ${uid} closed after 10 minutes inactivity`);
       }
     }, 10 * 60 * 1000);
 
@@ -532,50 +341,44 @@ app.get('/session-message-continue', async (req, res) => {
   const session = globalThis.sessions[uid];
   if (!session) return res.status(404).json({ error: 'Session not found' });
 
-  // Refresh lastUsed so this session doesn't auto-close
   session.lastUsed = Date.now();
-
   const { page } = session;
 
   try {
-    // 1. Wait for input to be ready
-    await page.waitForSelector('textarea[placeholder*="Message"]', { visible: true, timeout: 60000 });
+    await page.waitForSelector('textarea[placeholder*="Message"]', { visible: true, timeout: 30000 });
 
-    // 2. Count messages before sending
     const prevCount = await page.$$eval(
       'div[data-testid="completed-message"] div.font-display.font-light',
       msgs => msgs.length
     );
 
-    // 3. Send user message
-    await page.type('textarea[placeholder*="Message"]', message, { delay: 50 });
+    await page.type('textarea[placeholder*="Message"]', message, { delay: 30 });
     await page.waitForFunction(() => {
       const btn = document.querySelector('button[aria-label="Send a message..."]');
       return btn && !btn.disabled;
-    }, { timeout: 30000 });
+    }, { timeout: 15000 });
     await page.click('button[aria-label="Send a message..."]');
 
-    // 4. Wait for bot reply to appear (at least 2 new messages: user's + bot's)
     await page.waitForFunction(
       (count) => {
         return document.querySelectorAll(
           'div[data-testid="completed-message"] div.font-display.font-light'
         ).length >= count + 2;
       },
-      { timeout: 60000 },
+      { timeout: 30000 },
       prevCount
     );
 
-    // 5. Wait until top bot message stops changing (~1.5s stable)
+    // Faster stability check
     let lastText = '';
     let stableCount = 0;
-    while (stableCount < 3) {
+    while (stableCount < 2) {
       const currentText = await page.evaluate((userMsg) => {
         const allMsgs = Array.from(
           document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light')
         )
           .map(el => el.innerText.trim())
-          .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase()); // skip user message
+          .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase());
         return allMsgs[0] || '';
       }, message);
 
@@ -584,20 +387,18 @@ app.get('/session-message-continue', async (req, res) => {
         stableCount = 0;
         lastText = currentText;
       }
-      await new Promise(r => setTimeout(r, 1200));
+      await new Promise(r => setTimeout(r, 800));
     }
 
-    // 6. Get newest bot reply ignoring user's message
     const reply = await page.evaluate((userMsg) => {
       const allMsgs = Array.from(
         document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light')
       )
         .map(el => el.innerText.trim())
-        .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase()); // skip user message
+        .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase());
       return allMsgs[0] || null;
     }, message);
 
-    // 7. Update session message count
     const newCount = await page.$$eval(
       'div[data-testid="completed-message"] div.font-display.font-light',
       msgs => msgs.length
@@ -611,6 +412,7 @@ app.get('/session-message-continue', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`)
 })
