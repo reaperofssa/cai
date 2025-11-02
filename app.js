@@ -20,6 +20,7 @@ const SCREENSHOT_FILE = 'screenshot.png'
 
 // Keep browser instances alive for reuse - keyed by userDataDir
 const browserPool = new Map();
+const activeBrowserDirs = new Set(); // Track directories in use
 
 async function getOrCreateBrowser(userDataDir) {
   const key = userDataDir || PROFILE_DIR;
@@ -31,6 +32,7 @@ async function getOrCreateBrowser(userDataDir) {
       return browser;
     } else {
       browserPool.delete(key);
+      activeBrowserDirs.delete(key);
     }
   }
   
@@ -54,7 +56,37 @@ async function getOrCreateBrowser(userDataDir) {
   });
   
   browserPool.set(key, browser);
+  activeBrowserDirs.add(key);
   return browser;
+}
+
+async function launchTemporaryBrowser(userDataDir) {
+  // Make sure this directory isn't already in use
+  if (activeBrowserDirs.has(userDataDir)) {
+    throw new Error('Browser directory already in use: ' + userDataDir);
+  }
+  
+  activeBrowserDirs.add(userDataDir);
+  
+  const browser = await puppeteer.launch({
+    headless: true,
+    userDataDir: userDataDir,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--single-process',
+      '--no-zygote',
+      '--disable-extensions',
+      '--disable-default-apps'
+    ]
+  });
+  
+  return browser;
+}
+
+function releaseTemporaryBrowser(userDataDir) {
+  activeBrowserDirs.delete(userDataDir);
 }
 
 // Lightweight stealth - only essential overrides
@@ -165,7 +197,7 @@ app.get('/session-screenshot', async (req, res) => {
   const { profile } = req.query
   if (!profile) return res.status(400).send('Missing profile URL')
 
-  const tempDir = path.join(os.tmpdir(), 'pupp_profile_' + Date.now())
+  const tempDir = path.join(os.tmpdir(), 'pupp_profile_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9))
   fs.mkdirSync(tempDir, { recursive: true })
   let browser = null;
 
@@ -178,19 +210,7 @@ app.get('/session-screenshot', async (req, res) => {
     zip.extractAllTo(tempDir, true)
 
     // Don't use browser pooling for one-off screenshots
-    browser = await puppeteer.launch({
-      headless: true,
-      userDataDir: tempDir,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--single-process',
-        '--no-zygote',
-        '--disable-extensions',
-        '--disable-default-apps'
-      ]
-    })
+    browser = await launchTemporaryBrowser(tempDir);
 
     const page = await browser.newPage()
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
@@ -205,6 +225,7 @@ app.get('/session-screenshot', async (req, res) => {
     await page.screenshot({ path: screenshotPath, fullPage: false })
 
     await browser.close()
+    releaseTemporaryBrowser(tempDir);
     browser = null;
 
     const screenshotUrl = await uploadToCatbox(screenshotPath)
@@ -215,7 +236,10 @@ app.get('/session-screenshot', async (req, res) => {
     res.json({ screenshot: screenshotUrl })
   } catch (err) {
     console.error(err)
-    if (browser) await browser.close().catch(() => {});
+    if (browser) {
+      await browser.close().catch(() => {});
+      releaseTemporaryBrowser(tempDir);
+    }
     fs.rmSync(tempDir, { recursive: true, force: true });
     res.status(500).send('Error: ' + err.message)
   }
@@ -227,7 +251,7 @@ app.get('/session-message', async (req, res) => {
   if (!message) return res.status(400).send('Missing message');
   if (!chatId) return res.status(400).send('Missing chatId');
 
-  const tempDir = path.join(os.tmpdir(), 'pupp_profile_' + Date.now());
+  const tempDir = path.join(os.tmpdir(), 'pupp_profile_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9));
   fs.mkdirSync(tempDir, { recursive: true });
 
   try {
@@ -238,19 +262,7 @@ app.get('/session-message', async (req, res) => {
     new AdmZip(zipPath).extractAllTo(tempDir, true);
 
     // Launch browser (don't use pool - each session gets unique temp profile)
-    const browser = await puppeteer.launch({
-      headless: true,
-      userDataDir: tempDir,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--single-process',
-        '--no-zygote',
-        '--disable-extensions',
-        '--disable-default-apps'
-      ]
-    });
+    const browser = await launchTemporaryBrowser(tempDir);
 
     const page = await browser.newPage();
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
@@ -341,6 +353,7 @@ app.get('/session-message', async (req, res) => {
       const s = globalThis.sessions[uid];
       if (s && Date.now() - s.lastUsed >= 10 * 60 * 1000) {
         s.browser.close().catch(() => {});
+        releaseTemporaryBrowser(s.profileDir);
         fs.rmSync(s.profileDir, { recursive: true, force: true });
         delete globalThis.sessions[uid];
       }
