@@ -152,34 +152,59 @@ app.get('/q', async (req, res) => {
 
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 })
 
-    async function humanLikeActions(page) {
-      const box = await page.evaluate(() => ({
-        width: window.innerWidth,
-        height: window.innerHeight
-      }))
+    // Wait for any initial redirects to complete
+    await new Promise(r => setTimeout(r, 3000))
 
-      for (let i = 0; i < 5; i++) {
-        const x = Math.floor(Math.random() * box.width)
-        const y = Math.floor(Math.random() * box.height)
-        await page.mouse.move(x, y, { steps: 10 + Math.floor(Math.random() * 20) })
-        if (Math.random() > 0.7) {
-          await page.mouse.click(x, y)
+    async function humanLikeActions(page) {
+      try {
+        const box = await page.evaluate(() => ({
+          width: window.innerWidth,
+          height: window.innerHeight
+        }))
+
+        for (let i = 0; i < 5; i++) {
+          // Check if page is still valid before each action
+          if (page.isClosed()) break
+
+          try {
+            const x = Math.floor(Math.random() * box.width)
+            const y = Math.floor(Math.random() * box.height)
+            await page.mouse.move(x, y, { steps: 10 + Math.floor(Math.random() * 20) })
+            
+            if (Math.random() > 0.7) {
+              await page.mouse.click(x, y)
+            }
+            if (Math.random() > 0.5) {
+              await page.keyboard.press('ArrowDown')
+            }
+            if (Math.random() > 0.8) {
+              await page.evaluate(() => window.scrollBy(0, 100 + Math.floor(Math.random() * 200)))
+            }
+            await new Promise(r => setTimeout(r, 500 + Math.floor(Math.random() * 1000)))
+          } catch (err) {
+            // Navigation happened during action - this is expected, break out
+            if (err.message.includes('Execution context was destroyed') || 
+                err.message.includes('Session closed')) {
+              console.log('Navigation detected during human actions')
+              break
+            }
+            throw err
+          }
         }
-        if (Math.random() > 0.5) {
-          await page.keyboard.press('ArrowDown')
-        }
-        if (Math.random() > 0.8) {
-          await page.evaluate(() => window.scrollBy(0, 100 + Math.floor(Math.random() * 200)))
-        }
-        await new Promise(r => setTimeout(r, 500 + Math.floor(Math.random() * 1000)))
+      } catch (err) {
+        // Catch any other errors from humanLikeActions
+        console.log('Human actions interrupted (likely due to navigation):', err.message)
       }
     }
 
     await humanLikeActions(page)
 
+    // Wait for final page state
     await new Promise(r => setTimeout(r, 15000))
 
+    // Get final URL (safe to call even after navigation)
     const finalUrl = page.url()
+    
     if (finalUrl.startsWith('https://character.ai/')) {
       const html = await page.content()
       fs.writeFileSync(HTML_FILE, html)
@@ -206,7 +231,6 @@ app.get('/q', async (req, res) => {
     res.status(500).send('Error: ' + err.message)
   }
 })
-
 app.get('/session-screenshot', async (req, res) => {
   const { profile } = req.query
   if (!profile) return res.status(400).send('Missing profile URL')
