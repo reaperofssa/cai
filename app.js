@@ -240,23 +240,22 @@ app.get('/q', async (req, res) => {
 })
 
 app.get('/session-screenshot', async (req, res) => {
-  const { profile } = req.query
-  if (!profile) return res.status(400).send('Missing profile URL')
+  const { cookies } = req.query
+  if (!cookies) return res.status(400).send('Missing cookies URL')
 
-  const tempDir = path.join(os.tmpdir(), 'pupp_profile_' + Date.now())
-  fs.mkdirSync(tempDir, { recursive: true })
-
+  let browser
   try {
-    const response = await axios.get(profile, { responseType: 'arraybuffer' })
-    const zipPath = path.join(tempDir, 'profile.zip')
-    fs.writeFileSync(zipPath, response.data)
+    // Fetch cookies JSON from URL
+    const response = await axios.get(cookies)
+    const cookiesData = response.data
 
-    const zip = new AdmZip(zipPath)
-    zip.extractAllTo(tempDir, true)
+    // Validate that it's an array of cookies
+    if (!Array.isArray(cookiesData)) {
+      return res.status(400).send('Invalid cookies format - expected JSON array')
+    }
 
-    const browser = await puppeteer.launch({
+    browser = await puppeteer.launch({
       headless: true,
-      userDataDir: tempDir,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -355,43 +354,67 @@ app.get('/session-screenshot', async (req, res) => {
       }
     })
 
+    // Load cookies into the page BEFORE navigating
+    await page.setCookie(...cookiesData)
+
+    // Now navigate with cookies already set
     await page.goto('https://character.ai/', { waitUntil: 'networkidle2', timeout: 60000 })
 
     async function humanLikeActions(page) {
-      const box = await page.evaluate(() => ({
-        width: window.innerWidth,
-        height: window.innerHeight
-      }))
+      try {
+        const box = await page.evaluate(() => ({
+          width: window.innerWidth,
+          height: window.innerHeight
+        }))
 
-      for (let i = 0; i < 5; i++) {
-        const x = Math.floor(Math.random() * box.width)
-        const y = Math.floor(Math.random() * box.height)
-        await page.mouse.move(x, y, { steps: 10 + Math.floor(Math.random() * 20) })
-        if (Math.random() > 0.7) {
-          await page.mouse.click(x, y)
+        for (let i = 0; i < 5; i++) {
+          if (page.isClosed()) break
+
+          try {
+            const x = Math.floor(Math.random() * box.width)
+            const y = Math.floor(Math.random() * box.height)
+            await page.mouse.move(x, y, { steps: 10 + Math.floor(Math.random() * 20) })
+            
+            if (Math.random() > 0.7) {
+              await page.mouse.click(x, y)
+            }
+            if (Math.random() > 0.5) {
+              await page.keyboard.press('ArrowDown')
+            }
+            if (Math.random() > 0.8) {
+              await page.evaluate(() => window.scrollBy(0, 100 + Math.floor(Math.random() * 200)))
+            }
+            await new Promise(r => setTimeout(r, 500 + Math.floor(Math.random() * 1000)))
+          } catch (err) {
+            if (err.message.includes('Execution context was destroyed') || 
+                err.message.includes('Session closed')) {
+              console.log('Navigation detected during human actions')
+              break
+            }
+            throw err
+          }
         }
-        if (Math.random() > 0.5) {
-          await page.keyboard.press('ArrowDown')
-        }
-        if (Math.random() > 0.8) {
-          await page.evaluate(() => window.scrollBy(0, 100 + Math.floor(Math.random() * 200)))
-        }
-        await new Promise(r => setTimeout(r, 500 + Math.floor(Math.random() * 1000)))
+      } catch (err) {
+        console.log('Human actions interrupted:', err.message)
       }
     }
 
     await humanLikeActions(page)
     await new Promise(r => setTimeout(r, 10000))
 
+    const tempDir = path.join(os.tmpdir(), 'screenshot_' + Date.now())
+    fs.mkdirSync(tempDir, { recursive: true })
     const screenshotPath = path.join(tempDir, 'screenshot.png')
+    
     await page.screenshot({ path: screenshotPath, fullPage: true })
 
     await browser.close()
 
     const screenshotUrl = await uploadToCatbox(screenshotPath)
 
-    res.json({ screenshot: screenshotUrl })
+    res.json({ screenshot: screenshotUrl, message: 'Screenshot taken with loaded session' })
   } catch (err) {
+    if (browser) await browser.close()
     console.error(err)
     res.status(500).send('Error: ' + err.message)
   }
