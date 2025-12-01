@@ -48,8 +48,9 @@ app.get('/q', async (req, res) => {
   const { url } = req.query
   if (!url) return res.status(400).send('Missing url')
 
+  let browser
   try {
-    const browser = await puppeteer.launch({
+    browser = await puppeteer.launch({
       headless: true,
       userDataDir: PROFILE_DIR,
       args: [
@@ -163,7 +164,6 @@ app.get('/q', async (req, res) => {
         }))
 
         for (let i = 0; i < 5; i++) {
-          // Check if page is still valid before each action
           if (page.isClosed()) break
 
           try {
@@ -182,7 +182,6 @@ app.get('/q', async (req, res) => {
             }
             await new Promise(r => setTimeout(r, 500 + Math.floor(Math.random() * 1000)))
           } catch (err) {
-            // Navigation happened during action - this is expected, break out
             if (err.message.includes('Execution context was destroyed') || 
                 err.message.includes('Session closed')) {
               console.log('Navigation detected during human actions')
@@ -192,7 +191,6 @@ app.get('/q', async (req, res) => {
           }
         }
       } catch (err) {
-        // Catch any other errors from humanLikeActions
         console.log('Human actions interrupted (likely due to navigation):', err.message)
       }
     }
@@ -202,35 +200,45 @@ app.get('/q', async (req, res) => {
     // Wait for final page state
     await new Promise(r => setTimeout(r, 15000))
 
-    // Get final URL (safe to call even after navigation)
     const finalUrl = page.url()
     
     if (finalUrl.startsWith('https://character.ai/')) {
+      // Extract cookies in Puppeteer-compatible JSON format
+      const cookies = await page.cookies()
+      const cookiesJson = JSON.stringify(cookies, null, 2)
+      const COOKIES_FILE = path.join(__dirname, 'cookies.json')
+      fs.writeFileSync(COOKIES_FILE, cookiesJson)
+
+      // Get HTML and screenshot
       const html = await page.content()
       fs.writeFileSync(HTML_FILE, html)
       await page.screenshot({ path: SCREENSHOT_FILE, fullPage: true })
+      
       await browser.close()
 
-      const zipPath = await zipProfile()
-      const profileUrl = await uploadToCatbox(zipPath)
+      // Upload cookies, HTML, and screenshot
+      const cookiesUrl = await uploadToCatbox(COOKIES_FILE)
       const htmlUrl = await uploadToCatbox(HTML_FILE)
       const screenshotUrl = await uploadToCatbox(SCREENSHOT_FILE)
 
       return res.json({
-        profile: profileUrl,
+        cookies: cookiesUrl,
         html: htmlUrl,
         screenshot: screenshotUrl,
-        redirected: finalUrl
+        redirected: finalUrl,
+        message: 'Success - cookies saved in Puppeteer-ready format'
       })
     } else {
-      await browser.close()
+      if (browser) await browser.close()
       return res.json({ redirected: finalUrl, message: 'Did not match target redirect' })
     }
   } catch (err) {
+    if (browser) await browser.close()
     console.error(err)
     res.status(500).send('Error: ' + err.message)
   }
 })
+
 app.get('/session-screenshot', async (req, res) => {
   const { profile } = req.query
   if (!profile) return res.status(400).send('Missing profile URL')
