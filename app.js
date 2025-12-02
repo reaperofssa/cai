@@ -587,7 +587,7 @@ app.get('/session-messagex', async (req, res) => {
 
   let browser;
   try {
-    // Fetch cookies in parallel with browser launch
+    // Fetch cookies + browser launch in parallel
     const [cookiesResponse, browserInstance] = await Promise.all([
       axios.get(cookies),
       puppeteer.launch({
@@ -606,74 +606,86 @@ app.get('/session-messagex', async (req, res) => {
     const cookiesData = cookiesResponse.data;
 
     if (!Array.isArray(cookiesData)) {
-      return res.status(400).send('Invalid cookies format');
+      return res.status(400).send('Invalid cookies JSON');
     }
 
     const page = await browser.newPage();
 
-    // Minimal stealth - only essential overrides
+    // Minimal stealth
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
     });
 
-    // Set cookies before navigation
     await page.setCookie(...cookiesData);
 
-    // Navigate directly to chat
     await page.goto(`https://character.ai/chat/${chatId}`, {
       waitUntil: 'domcontentloaded',
       timeout: 45000
     });
 
-    // Wait for textarea
     await page.waitForSelector('textarea[placeholder*="Message"]', {
       visible: true,
       timeout: 30000
     });
 
-    // Type and send message
-    await page.type('textarea[placeholder*="Message"]', message, { delay: 30 });
-    await page.waitForSelector('button[aria-label="Send a message..."]', { timeout: 10000 });
+    // Count existing messages BEFORE sending (same as original logic)
+    const initialCount = await page.$$eval(
+      'div[data-testid="completed-message"] div.font-display.font-light',
+      msgs => msgs.length
+    );
+
+    // Send message
+    await page.type('textarea[placeholder*="Message"]', message, { delay: 40 });
+
+    await page.waitForFunction(() => {
+      const btn = document.querySelector('button[aria-label="Send a message..."]');
+      return btn && !btn.disabled;
+    }, { timeout: 15000 });
+
     await page.click('button[aria-label="Send a message..."]');
 
-    // Wait for bot response using MutationObserver (much faster than polling/reloading)
-    const reply = await page.evaluate((userMessage) => {
-      return new Promise((resolve) => {
-        let lastBotMessage = '';
-        let noChangeCount = 0;
-        const maxNoChange = 5; // Stable for 5 checks = done
-        
-        const checkInterval = setInterval(() => {
-          const messages = Array.from(document.querySelectorAll(
+    // --------------------------------------------
+    // ✔ TRUE stable message extraction (copied from original)
+    // --------------------------------------------
+    const reply = await page.evaluate((userMsg, prevCount) => {
+      return new Promise(resolve => {
+        let lastText = "";
+        let stableCount = 0;
+
+        const check = setInterval(() => {
+          const allMsgs = Array.from(document.querySelectorAll(
             'div[data-testid="completed-message"] div.font-display.font-light'
           ));
-          
-          // Get last message that's not the user's message
-          const botMessages = messages
+
+          const newMsgs = allMsgs.slice(prevCount);
+          const botMsgs = newMsgs
             .map(el => el.innerText.trim())
-            .filter(text => text && text.toLowerCase() !== userMessage.toLowerCase());
-          
-          const currentBotMessage = botMessages[botMessages.length - 1] || '';
-          
-          if (currentBotMessage && currentBotMessage === lastBotMessage) {
-            noChangeCount++;
-            if (noChangeCount >= maxNoChange) {
-              clearInterval(checkInterval);
-              resolve(currentBotMessage);
+            .filter(t => t && t.toLowerCase() !== userMsg.toLowerCase());
+
+          const currentText = botMsgs[0] || "";
+
+          // If same text repeating, stable
+          if (currentText === lastText) {
+            stableCount++;
+            if (stableCount >= 3) {
+              clearInterval(check);
+              resolve(currentText || null);
             }
           } else {
-            noChangeCount = 0;
-            lastBotMessage = currentBotMessage;
+            stableCount = 0;
+            lastText = currentText;
           }
-        }, 400); // Check every 400ms
-        
-        // Timeout after 60 seconds
+
+        }, 500);
+
+        // 50s timeout fallback
         setTimeout(() => {
-          clearInterval(checkInterval);
-          resolve(lastBotMessage || null);
-        }, 60000);
+          clearInterval(check);
+          resolve(lastText || null);
+        }, 50000);
       });
-    }, message);
+    }, message, initialCount);
+    // --------------------------------------------
 
     await browser.close();
 
