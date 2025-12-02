@@ -588,65 +588,76 @@ app.get('/chat', async (req, res) => {
 
   let browser;
   try {
-    // Fetch cookies + browser launch in parallel
-    const [cookiesResponse, browserInstance] = await Promise.all([
-      axios.get(cookies),
-      puppeteer.launch({
-        headless: true,
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-blink-features=AutomationControlled',
-          '--disable-features=IsolateOrigins,site-per-process'
-        ]
-      })
-    ]);
-
-    browser = browserInstance;
-    const cookiesData = cookiesResponse.data;
+    // 1. Fetch cookies JSON from URL
+    const response = await axios.get(cookies);
+    const cookiesData = response.data;
 
     if (!Array.isArray(cookiesData)) {
-      return res.status(400).send('Invalid cookies JSON');
+      return res.status(400).send('Invalid cookies format - expected JSON array');
     }
+
+    // 2. Launch Puppeteer
+    browser = await puppeteer.launch({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-features=IsolateOrigins,site-per-process',
+        '--flag-switches-begin --disable-site-isolation-trials --flag-switches-end'
+      ]
+    });
 
     const page = await browser.newPage();
 
-    // Minimal stealth
+    // 3. Random UA
+    const userAgents = [
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36',
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36',
+      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36'
+    ];
+    await page.setUserAgent(userAgents[Math.floor(Math.random() * userAgents.length)]);
+    await page.setViewport({
+      width: 1280 + Math.floor(Math.random() * 50),
+      height: 720 + Math.floor(Math.random() * 50),
+      deviceScaleFactor: 1
+    });
+
+    // 4. Stealth patches
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+      Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+      Object.defineProperty(navigator, 'language', { get: () => 'en-US' });
+      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4] });
+      Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+      Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+      Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 });
     });
 
+    // 5. Load cookies BEFORE navigating
     await page.setCookie(...cookiesData);
 
+    // 6. Open chat page using chatId
     await page.goto(`https://character.ai/chat/${chatId}`, {
       waitUntil: 'domcontentloaded',
-      timeout: 45000
+      timeout: 60000
     });
 
+    // 7. Wait for input
     await page.waitForSelector('textarea[placeholder*="Message"]', {
       visible: true,
-      timeout: 30000
+      timeout: 60000
     });
 
-    // Count existing messages BEFORE sending (same as original logic)
+    // 8. Count messages before sending
     const initialCount = await page.$$eval(
       'div[data-testid="completed-message"] div.font-display.font-light',
       msgs => msgs.length
     );
 
-    // Send message
-    await page.type('textarea[placeholder*="Message"]', message, { delay: 40 });
-
-    await page.waitForFunction(() => {
-      const btn = document.querySelector('button[aria-label="Send a message..."]');
-      return btn && !btn.disabled;
-    }, { timeout: 15000 });
-
-    await page.click('button[aria-label="Send a message..."]');
-
-    // === YOUR NEW RESPONSE EXTRACTION LOGIC ATTACHED BELOW (with double reload kept) ===
-
+    // 9. Send message
     await page.type('textarea[placeholder*="Message"]', message, { delay: 50 });
     await page.waitForFunction(() => {
       const btn = document.querySelector('button[aria-label="Send a message..."]');
@@ -654,7 +665,7 @@ app.get('/chat', async (req, res) => {
     }, { timeout: 30000 });
     await page.click('button[aria-label="Send a message..."]');
 
-    // 10. Refresh page twice before fetching reply (kept exactly as you requested)
+    // 10. Refresh page twice before fetching reply
     for (let i = 0; i < 2; i++) {
       await page.reload({ waitUntil: 'networkidle2', timeout: 60000 });
       await page.waitForSelector('textarea[placeholder*="Message"]', { visible: true, timeout: 60000 });
@@ -699,17 +710,18 @@ app.get('/chat', async (req, res) => {
       return botMsgs[0] || null;
     }, message, initialCount);
 
-    // === FINALLY RESPOND WITH THE REPLY ===
-    if (!reply) {
-      return res.status(500).send('No reply received from character');
-    }
-    res.send({ reply });
+    // ❌ REMOVED UID + SESSIONS
+    // ❌ REMOVED AUTO-CLOSE TIMER
+    // ✔ ALWAYS CLOSE BROWSER NOW
+
+    await browser.close();
+
+    res.json({ reply });
 
   } catch (err) {
-    console.error(err);
-    res.status(500).send('Internal server error: ' + err.message);
-  } finally {
     if (browser) await browser.close();
+    console.error(err);
+    res.status(500).send('Error: ' + err.message);
   }
 });
 
