@@ -579,7 +579,112 @@ app.get('/session-message', async (req, res) => {
     res.status(500).send('Error: ' + err.message);
   }
 });
+app.get('/session-messagex', async (req, res) => {
+  const { cookies, message, chatId } = req.query;
+  if (!cookies) return res.status(400).send('Missing cookies URL');
+  if (!message) return res.status(400).send('Missing message');
+  if (!chatId) return res.status(400).send('Missing chatId');
 
+  let browser;
+  try {
+    // Fetch cookies in parallel with browser launch
+    const [cookiesResponse, browserInstance] = await Promise.all([
+      axios.get(cookies),
+      puppeteer.launch({
+        headless: true,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-blink-features=AutomationControlled',
+          '--disable-features=IsolateOrigins,site-per-process'
+        ]
+      })
+    ]);
+
+    browser = browserInstance;
+    const cookiesData = cookiesResponse.data;
+
+    if (!Array.isArray(cookiesData)) {
+      return res.status(400).send('Invalid cookies format');
+    }
+
+    const page = await browser.newPage();
+
+    // Minimal stealth - only essential overrides
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    });
+
+    // Set cookies before navigation
+    await page.setCookie(...cookiesData);
+
+    // Navigate directly to chat
+    await page.goto(`https://character.ai/chat/${chatId}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 45000
+    });
+
+    // Wait for textarea
+    await page.waitForSelector('textarea[placeholder*="Message"]', {
+      visible: true,
+      timeout: 30000
+    });
+
+    // Type and send message
+    await page.type('textarea[placeholder*="Message"]', message, { delay: 30 });
+    await page.waitForSelector('button[aria-label="Send a message..."]', { timeout: 10000 });
+    await page.click('button[aria-label="Send a message..."]');
+
+    // Wait for bot response using MutationObserver (much faster than polling/reloading)
+    const reply = await page.evaluate((userMessage) => {
+      return new Promise((resolve) => {
+        let lastBotMessage = '';
+        let noChangeCount = 0;
+        const maxNoChange = 5; // Stable for 5 checks = done
+        
+        const checkInterval = setInterval(() => {
+          const messages = Array.from(document.querySelectorAll(
+            'div[data-testid="completed-message"] div.font-display.font-light'
+          ));
+          
+          // Get last message that's not the user's message
+          const botMessages = messages
+            .map(el => el.innerText.trim())
+            .filter(text => text && text.toLowerCase() !== userMessage.toLowerCase());
+          
+          const currentBotMessage = botMessages[botMessages.length - 1] || '';
+          
+          if (currentBotMessage && currentBotMessage === lastBotMessage) {
+            noChangeCount++;
+            if (noChangeCount >= maxNoChange) {
+              clearInterval(checkInterval);
+              resolve(currentBotMessage);
+            }
+          } else {
+            noChangeCount = 0;
+            lastBotMessage = currentBotMessage;
+          }
+        }, 400); // Check every 400ms
+        
+        // Timeout after 60 seconds
+        setTimeout(() => {
+          clearInterval(checkInterval);
+          resolve(lastBotMessage || null);
+        }, 60000);
+      });
+    }, message);
+
+    await browser.close();
+
+    res.json({ reply });
+
+  } catch (err) {
+    if (browser) await browser.close().catch(() => {});
+    console.error(err);
+    res.status(500).send('Error: ' + err.message);
+  }
+});
 app.get('/session-message-continue', async (req, res) => {
   const { uid, message } = req.query;
   if (!uid) return res.status(400).json({ error: 'Missing uid' });
