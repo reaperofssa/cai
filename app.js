@@ -581,13 +581,13 @@ app.get('/session-message', async (req, res) => {
 });
 app.get('/session-messagex', async (req, res) => {
   const { cookies, message, chatId } = req.query;
+
   if (!cookies) return res.status(400).send('Missing cookies URL');
   if (!message) return res.status(400).send('Missing message');
-  if (!chatId) return res.status(400).send('Missing chatId');
+  if (!chatId)  return res.status(400).send('Missing chatId');
 
   let browser;
   try {
-    // Fetch cookies + browser launch in parallel
     const [cookiesResponse, browserInstance] = await Promise.all([
       axios.get(cookies),
       puppeteer.launch({
@@ -597,9 +597,11 @@ app.get('/session-messagex', async (req, res) => {
           '--disable-setuid-sandbox',
           '--disable-dev-shm-usage',
           '--disable-blink-features=AutomationControlled',
-          '--disable-features=IsolateOrigins,site-per-process'
-        ]
-      })
+          '--disable-features=IsolateOrigins,site-per-process',
+          '--disable-infobars',
+          '--window-size=1920,1080',
+        ],
+      }),
     ]);
 
     browser = browserInstance;
@@ -614,87 +616,81 @@ app.get('/session-messagex', async (req, res) => {
     // Minimal stealth
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+      delete navigator.__proto__.webdriver;
     });
 
     await page.setCookie(...cookiesData);
-
     await page.goto(`https://character.ai/chat/${chatId}`, {
       waitUntil: 'domcontentloaded',
-      timeout: 45000
+      timeout: 60000,
     });
 
-    await page.waitForSelector('textarea[placeholder*="Message"]', {
-      visible: true,
-      timeout: 30000
-    });
+    // Wait for message box
+    await page.waitForSelector('textarea[placeholder*="Message"]', { visible: true, timeout: 30000 });
 
-    // Count existing messages BEFORE sending (same as original logic)
+    // Count messages BEFORE sending (so we know where new ones start)
     const initialCount = await page.$$eval(
       'div[data-testid="completed-message"] div.font-display.font-light',
-      msgs => msgs.length
+      els => els.length
     );
 
-    // Send message
-    await page.type('textarea[placeholder*="Message"]', message, { delay: 40 });
+    // === SEND MESSAGE ===
+    await page.type('textarea[placeholder*="Message"]', message, { delay: 50 });
 
-    await page.waitForFunction(() => {
-      const btn = document.querySelector('button[aria-label="Send a message..."]');
-      return btn && !btn.disabled;
-    }, { timeout: 15000 });
+    await page.waitForFunction(
+      () => {
+        const btn = document.querySelector('button[aria-label="Send a message..."]');
+        return btn && !btn.disabled;
+      },
+      { timeout: 20000 }
+    );
 
-    await page.click('button[aria-label="Send a message..."]');
+    await Promise.all([
+      page.click('button[aria-label="Send a message..."]'),
+      page.waitForResponse(resp => resp.url().includes('/send_message/') || resp.url().includes('/trpc/')), // optional: wait for request
+    ]);
 
-    // --------------------------------------------
-    // ✔ TRUE stable message extraction (copied from original)
-    // --------------------------------------------
-    const reply = await page.evaluate((userMsg, prevCount) => {
-      return new Promise(resolve => {
-        let lastText = "";
-        let stableCount = 0;
+    // === WAIT FOR BOT REPLY TO STABILIZE ===
+    let lastText = '';
+    let stableCount = 0;
+    let reply = '';
 
-        const check = setInterval(() => {
-          const allMsgs = Array.from(document.querySelectorAll(
-            'div[data-testid="completed-message"] div.font-display.font-light'
-          ));
+    while (stableCount < 4) { // 4 consecutive identical reads = stable
+      reply = await page.evaluate((userMsg, prevCount) => {
+        const messages = Array.from(
+          document.querySelectorAll('div[data-testid="completed-message"] div.font-display.font-light')
+        );
 
-          const newMsgs = allMsgs.slice(prevCount);
-          const botMsgs = newMsgs
-            .map(el => el.innerText.trim())
-            .filter(t => t && t.toLowerCase() !== userMsg.toLowerCase());
+        const newMessages = messages.slice(prevCount);
+        const botTexts = newMessages
+          .map(el => el.innerText.trim())
+          .filter(text => text && text.toLowerCase() !== userMsg.toLowerCase());
 
-          const currentText = botMsgs[0] || "";
+        return botTexts[0] || '';
+      }, message, initialCount);
 
-          // If same text repeating, stable
-          if (currentText === lastText) {
-            stableCount++;
-            if (stableCount >= 3) {
-              clearInterval(check);
-              resolve(currentText || null);
-            }
-          } else {
-            stableCount = 0;
-            lastText = currentText;
-          }
+      if (reply === lastText && reply !== '') {
+        stableCount++;
+      } else {
+        stableCount = 0;
+        lastText = reply;
+      }
 
-        }, 500);
-
-        // 50s timeout fallback
-        setTimeout(() => {
-          clearInterval(check);
-          resolve(lastText || null);
-        }, 50000);
-      });
-    }, message, initialCount);
-    // --------------------------------------------
+      if (stableCount < 4) await page.waitForTimeout(800); // wait a bit before next check
+    }
 
     await browser.close();
 
-    res.json({ reply });
+    if (!reply) {
+      return res.status(504).json({ error: 'No reply received (timeout or blocked)' });
+    }
+
+    return res.json({ reply });
 
   } catch (err) {
-    if (browser) await browser.close().catch(() => {});
     console.error(err);
-    res.status(500).send('Error: ' + err.message);
+    if (browser) await browser.close().catch(() => {});
+    return res.status(500).json({ error: err.message || 'Unknown error' });
   }
 });
 app.get('/session-message-continue', async (req, res) => {
