@@ -421,25 +421,24 @@ app.get('/session-screenshot', async (req, res) => {
 })
 
 app.get('/session-message', async (req, res) => {
-  const { profile, message, chatId } = req.query;
-  if (!profile) return res.status(400).send('Missing profile URL');
+  const { cookies, message, chatId } = req.query;
+  if (!cookies) return res.status(400).send('Missing cookies URL');
   if (!message) return res.status(400).send('Missing message');
   if (!chatId) return res.status(400).send('Missing chatId');
 
-  const tempDir = path.join(os.tmpdir(), 'pupp_profile_' + Date.now());
-  fs.mkdirSync(tempDir, { recursive: true });
-
+  let browser;
   try {
-    // 1. Download and extract profile
-    const response = await axios.get(profile, { responseType: 'arraybuffer' });
-    const zipPath = path.join(tempDir, 'profile.zip');
-    fs.writeFileSync(zipPath, response.data);
-    new AdmZip(zipPath).extractAllTo(tempDir, true);
+    // 1. Fetch cookies JSON from URL
+    const response = await axios.get(cookies);
+    const cookiesData = response.data;
+
+    if (!Array.isArray(cookiesData)) {
+      return res.status(400).send('Invalid cookies format - expected JSON array');
+    }
 
     // 2. Launch Puppeteer
-    const browser = await puppeteer.launch({
+    browser = await puppeteer.launch({
       headless: true,
-      userDataDir: tempDir,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -477,25 +476,28 @@ app.get('/session-message', async (req, res) => {
       Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 });
     });
 
-    // 5. Open chat page using chatId
+    // 5. Load cookies BEFORE navigating
+    await page.setCookie(...cookiesData);
+
+    // 6. Open chat page using chatId
     await page.goto(`https://character.ai/chat/${chatId}`, {
       waitUntil: 'domcontentloaded',
       timeout: 60000
     });
 
-    // 6. Wait for input
+    // 7. Wait for input
     await page.waitForSelector('textarea[placeholder*="Message"]', {
       visible: true,
       timeout: 60000
     });
 
-    // 7. Count messages before sending
+    // 8. Count messages before sending
     const initialCount = await page.$$eval(
       'div[data-testid="completed-message"] div.font-display.font-light',
       msgs => msgs.length
     );
 
-    // 8. Send message
+    // 9. Send message
     await page.type('textarea[placeholder*="Message"]', message, { delay: 50 });
     await page.waitForFunction(() => {
       const btn = document.querySelector('button[aria-label="Send a message..."]');
@@ -503,19 +505,19 @@ app.get('/session-message', async (req, res) => {
     }, { timeout: 30000 });
     await page.click('button[aria-label="Send a message..."]');
 
-    // 8b. Refresh page twice before fetching reply
+    // 10. Refresh page twice before fetching reply
     for (let i = 0; i < 2; i++) {
       await page.reload({ waitUntil: 'networkidle2', timeout: 60000 });
       await page.waitForSelector('textarea[placeholder*="Message"]', { visible: true, timeout: 60000 });
     }
 
-    // 9. Count messages after reloads
+    // 11. Count messages after reloads
     const postReloadCount = await page.$$eval(
       'div[data-testid="completed-message"] div.font-display.font-light',
       msgs => msgs.length
     );
 
-    // 10. Wait until top bot message stops changing
+    // 12. Wait until top bot message stops changing
     let lastText = '';
     let stableCount = 0;
     while (stableCount < 3) {
@@ -537,7 +539,7 @@ app.get('/session-message', async (req, res) => {
       await new Promise(r => setTimeout(r, 500));
     }
 
-    // 11. Get newest bot reply ignoring user's own message
+    // 13. Get newest bot reply ignoring user's own message
     const reply = await page.evaluate((userMsg, prevCount) => {
       const allMsgs = Array.from(document.querySelectorAll(
         'div[data-testid="completed-message"] div.font-display.font-light'
@@ -548,15 +550,15 @@ app.get('/session-message', async (req, res) => {
       return botMsgs[0] || null;
     }, message, initialCount);
 
-    // 12. Store session with cleanup timer
+    // 14. Store session with cleanup timer
     const uid = Math.random().toString(36).substring(2, 10);
     globalThis.sessions = globalThis.sessions || {};
     globalThis.sessions[uid] = {
       browser,
       page,
+      cookiesUrl: cookies,
       messageCount: postReloadCount,
-      lastUsed: Date.now(),
-      profileDir: tempDir
+      lastUsed: Date.now()
     };
 
     // Auto-close after 10 minutes of inactivity
@@ -564,7 +566,6 @@ app.get('/session-message', async (req, res) => {
       const s = globalThis.sessions[uid];
       if (s && Date.now() - s.lastUsed >= 10 * 60 * 1000) {
         s.browser.close().catch(() => {});
-        fs.rmSync(s.profileDir, { recursive: true, force: true });
         delete globalThis.sessions[uid];
         console.log(`Session ${uid} closed after 10 minutes inactivity`);
       }
@@ -573,6 +574,7 @@ app.get('/session-message', async (req, res) => {
     res.json({ uid, reply });
 
   } catch (err) {
+    if (browser) await browser.close();
     console.error(err);
     res.status(500).send('Error: ' + err.message);
   }
